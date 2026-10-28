@@ -15,14 +15,12 @@ if (!requireNamespace("readxl", quietly = TRUE)) {
   stop("Package 'readxl' is required. Install it with install.packages('readxl').")
 }
 
-data_path <- file.path(utils::shortPathName(getwd()), "Data_Cortex_Nuclear.xls")
+data_path <- "Data_Cortex_Nuclear.xls"
 if (!file.exists(data_path)) data_path <- file.choose()
-data_path <- utils::shortPathName(data_path)
-read_path <- file.path(tempdir(), "Data_Cortex_Nuclear_for_analysis.xls")
+read_path <- file.path(tempdir(), "Data_Cortex_Nuclear.xls")
 if (!file.copy(data_path, read_path, overwrite = TRUE)) {
   stop("Could not copy the source workbook to a temporary path for reading.")
 }
-
 dados <- as.data.frame(readxl::read_excel(read_path, na = c("NA", "")))
 names(dados) <- trimws(names(dados))
 
@@ -110,6 +108,20 @@ missing_by_mouse <- data.frame(
   stringsAsFactors = FALSE
 )
 
+missingness_by_class <- do.call(rbind, lapply(class_levels, function(cl) {
+  in_class <- mouse_metadata$class == cl
+  missing_averages <- missing_by_mouse$proteins_missing_after_averaging[in_class]
+  data.frame(
+    class = cl,
+    mice = sum(in_class),
+    mice_with_missing_averages = sum(missing_averages > 0),
+    percent_mice_with_missing_averages = 100 * mean(missing_averages > 0),
+    median_missing_protein_averages = stats::median(missing_averages),
+    max_missing_protein_averages = max(missing_averages),
+    stringsAsFactors = FALSE
+  )
+}))
+
 total_protein_values <- nrow(dados) * length(protein_names)
 total_missing <- sum(is.na(as.matrix(dados[protein_names])))
 proteins_with_missing <- sum(colSums(missing_counts) > 0)
@@ -188,6 +200,14 @@ print(utils::head(missing_by_mouse[order(-missing_by_mouse$missing_measurements)
                                    c("MouseID", "class", "missing_measurements",
                                      "missing_protein_averages", "partly_missing_proteins")], 5),
       row.names = FALSE)
+cat("\nMissing mouse-level protein averages by class (descriptive; not a test of missingness mechanism):\n")
+missingness_by_class_print <- data.frame(
+  Class = missingness_by_class$class,
+  Mice = missingness_by_class$mice,
+  Mice_with_NA = missingness_by_class$mice_with_missing_averages,
+  Pct_mice_NA = round(missingness_by_class$percent_mice_with_missing_averages, 1)
+)
+print(missingness_by_class_print, row.names = FALSE)
 cat("Median within-mouse SD / between-mouse SD ratio:",
     sprintf("%.2f", median(within_between_ratio, na.rm = TRUE)),
     "(larger values mean repeated readings vary more within mice)\n")
@@ -408,4 +428,5 @@ if (exists("pca_loadings")) {
 if (interactive()) {
   View(protein_diagnostics, title = "Protein-level diagnostics")
   View(missing_by_mouse, title = "Mouse-level diagnostics")
+  View(missingness_by_class, title = "Missingness by class")
 }
