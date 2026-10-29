@@ -319,6 +319,7 @@ boxplot(list(Genotype = factor_effects$genotype_eta2,
 # Figure 5. Rank proteins by their marginal associations with genotype, treatment, and behaviour.
 factor_eta_columns <- c("genotype_eta2", "treatment_eta2", "behavior_eta2")
 duplicate_redundancies <- unique(exact_duplicate_features$protein_2)
+# Exclude exact duplicate columns so the same protein signal is not ranked twice.
 factor_effects_for_plot <- factor_effects[!factor_effects$protein %in% duplicate_redundancies, , drop = FALSE]
 factor_eta_matrix_all <- as.matrix(factor_effects_for_plot[, factor_eta_columns, drop = FALSE])
 max_factor_eta2 <- apply(factor_eta_matrix_all, 1, max, na.rm = TRUE)
@@ -336,7 +337,7 @@ n_top_factor_proteins <- nrow(top_factor_effects)
 protein_y_positions <- rev(seq_len(n_top_factor_proteins))
 plot_max_eta2 <- max(top_factor_eta_matrix, na.rm = TRUE)
 par(mar = c(5, 10, 4, 2), xpd = FALSE)
-plot(NA, xlim = c(0, plot_max_eta2 * 1.8),
+plot(NA, xlim = c(0, plot_max_eta2 * 2.5),
      ylim = c(0.5, n_top_factor_proteins + 0.5),
      xaxt = "s", yaxt = "n", xlab = expression("Marginal " * eta^2), ylab = "",
      main = "Proteins most associated with each experimental factor")
