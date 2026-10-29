@@ -109,6 +109,11 @@ missing_by_protein <- data.frame(
 )
 missing_by_protein <- missing_by_protein[order(-missing_by_protein$missing_measurements,
                                                missing_by_protein$protein), ]
+# Retain all proteins in the missingness summaries, but omit proteins that are
+# entirely missing in at least five mice from the primary PCA.
+high_missing_proteins <- missing_by_protein$protein[
+  missing_by_protein$mice_missing_all_readings >= 5
+]
 
 missing_by_mouse <- data.frame(
   MouseID = mouse_metadata$MouseID,
@@ -248,24 +253,50 @@ cat(sprintf("\nSlide-ready summary: %d mice, %d proteins, %d classes; %d-%d meas
 
 class_factor <- droplevels(mouse_metadata$class)
 
-# Exact duplicate columns remain in descriptive outputs and correlations, but are
-# excluded from PCA so repeated information does not receive extra weight.
+# Higuera et al. (2015, PLoS ONE 10:e0129126, Data preprocessing) filled missing
+# values with the class mean and removed a t-CS-m mouse with extensive missingness
+# and atypical values from an earlier file; that animal is absent from this 72-mouse
+# UCI workbook. For our PCA, avoid class-based imputation (it uses the target labels) and
+# avoid imputing whole-animal gaps: exclude the six proteins entirely missing in at
+# least five mice, then median-impute only the two remaining missing mouse averages.
+# Tang, Jana & Fan (2024, arXiv:2408.12564, Section 6.1) also drop these six proteins;
+# unlike their replicate-level complete-case analysis, we aggregate within mouse
+# first and retain all 72 mice. For classification, refit this feature handling
+# inside each training fold.
+# Ahmed et al. (2015, PLoS ONE 10:e0119491, Statistical analysis) model replicate
+# and dilution measurements within mouse using three-level mixed effects. Mouse
+# means are a transparent descriptive summary here, not that inferential model.
+# The course PCA notes motivate standardisation when variables have different scales.
 duplicate_proteins_to_exclude_from_pca <- unique(exact_duplicate_features$protein_2)
-pca_candidate_proteins <- setdiff(protein_names, duplicate_proteins_to_exclude_from_pca)
+pca_candidate_proteins <- setdiff(
+  protein_names,
+  c(duplicate_proteins_to_exclude_from_pca, high_missing_proteins)
+)
 observed_medians <- apply(mouse_means[, pca_candidate_proteins, drop = FALSE], 2,
                           stats::median, na.rm = TRUE)
 usable_proteins <- names(observed_medians)[is.finite(observed_medians)]
 X <- mouse_means[, usable_proteins, drop = FALSE]
+n_pca_imputed <- sum(is.na(X))
 for (j in seq_len(ncol(X))) X[is.na(X[, j]), j] <- observed_medians[colnames(X)[j]]
 variable_proteins <- apply(X, 2, stats::sd) > 0
 X <- X[, variable_proteins, drop = FALSE]
-cat(sprintf("\nPCA preprocessing: %d exact duplicate protein columns excluded; %d variable proteins retained after median imputation.\n",
-            length(duplicate_proteins_to_exclude_from_pca), ncol(X)))
+cat(sprintf("\nPCA preprocessing: %d high-missingness proteins excluded (%s), %d duplicate column excluded; %d variable proteins retained; %d remaining mouse averages median-imputed.\n",
+            length(high_missing_proteins), paste(high_missing_proteins, collapse = ", "),
+            length(duplicate_proteins_to_exclude_from_pca), ncol(X), n_pca_imputed))
 
-protein_variances <- apply(mouse_means, 2, stats::var, na.rm = TRUE)
-protein_variances <- protein_variances[is.finite(protein_variances)]
-selected_proteins <- names(sort(protein_variances, decreasing = TRUE))[seq_len(min(4, length(protein_variances)))]
-cat("\nHighest-variance proteins shown in the boxplots:\n")
+# Choose the boxplot examples by association with the eight-class label rather than
+# raw variance, which mainly ranks proteins by measurement scale. This is descriptive
+# feature selection; repeat it inside training folds if used for classification.
+boxplot_candidates <- factor_effects[
+  !factor_effects$protein %in% c(high_missing_proteins,
+                                  unique(exact_duplicate_features$protein_2)),
+  , drop = FALSE
+]
+selected_proteins <- head(
+  boxplot_candidates$protein[order(boxplot_candidates$eight_class_eta2, decreasing = TRUE)],
+  4
+)
+cat("\nProteins selected for the class boxplots (highest marginal eight-class eta-squared; descriptive):\n")
 print(selected_proteins)
 
 # Figure 1. Proteins with the greatest amount of missing measurement data.
@@ -331,39 +362,59 @@ if (length(class_breaks)) {
 }
 print(missingness_map)
 
-# Figure 3. Number of mice represented in each target class.
-class_count_data <- data.frame(
-  class = names(mice_by_class),
-  mice = as.integer(mice_by_class),
-  stringsAsFactors = FALSE
+# Figure 3. Experimental design as a dot matrix: one dot represents one mouse.
+design_plot_data <- mouse_metadata
+design_plot_data$class <- factor(
+  design_plot_data$class,
+  levels = c("c-CS-s", "c-CS-m", "c-SC-s", "c-SC-m",
+             "t-CS-s", "t-CS-m", "t-SC-s", "t-SC-m")
 )
-class_count_plot <- ggplot2::ggplot(
-  class_count_data,
-  ggplot2::aes(x = stats::reorder(class, mice), y = mice)
-) +
-  ggplot2::geom_col(fill = "#4477AA", width = 0.72) +
-  ggplot2::geom_text(ggplot2::aes(label = mice), hjust = -0.2, size = 3.5) +
-  ggplot2::coord_flip() +
-  ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0, 0.12))) +
-  ggplot2::labs(
-    title = "Number of mice per class",
-    subtitle = sprintf("%d mice across %d classes", nrow(mouse_metadata), length(mice_by_class)),
-    x = "Class", y = "Number of mice"
+design_plot_data$GenotypeTreatment <- factor(
+  paste(design_plot_data$Genotype, design_plot_data$Treatment, sep = " | "),
+  levels = c("Control | Saline", "Control | Memantine",
+             "Ts65Dn | Saline", "Ts65Dn | Memantine")
+)
+design_plot_data$dot_index <- ave(seq_len(nrow(design_plot_data)),
+                                  design_plot_data$class, FUN = seq_along)
+design_plot_data$dot_x <- (design_plot_data$dot_index - 1) %% 5
+design_plot_data$dot_y <- (design_plot_data$dot_index - 1) %/% 5
+design_labels <- unique(design_plot_data[, c("Behavior", "GenotypeTreatment", "class")])
+design_labels$n_mice <- as.integer(mice_by_class[as.character(design_labels$class)])
+design_plot <- ggplot2::ggplot(design_plot_data,
+                               ggplot2::aes(x = dot_x, y = dot_y, fill = class)) +
+  ggplot2::geom_point(shape = 21, size = 3.6, colour = "white", stroke = 0.7) +
+  ggplot2::geom_text(
+    data = design_labels,
+    ggplot2::aes(x = 2, y = 2.15, label = paste0(as.character(class), "\n(n = ", n_mice, ")")),
+    inherit.aes = FALSE, size = 3.1
   ) +
-  ggplot2::theme_minimal(base_size = 11) +
-  ggplot2::theme(panel.grid.minor = ggplot2::element_blank(),
-                 panel.grid.major.y = ggplot2::element_blank(),
-                 plot.title = ggplot2::element_text(face = "bold"))
-print(class_count_plot)
+  ggplot2::facet_grid(Behavior ~ GenotypeTreatment) +
+  ggplot2::scale_fill_manual(values = class_colors, guide = "none") +
+  ggplot2::scale_x_continuous(limits = c(-0.5, 4.5), breaks = NULL) +
+  ggplot2::scale_y_continuous(limits = c(-0.45, 2.65), breaks = NULL) +
+  ggplot2::labs(
+    title = "Experimental design and mice per class",
+    subtitle = "Each dot represents one mouse; groups combine genotype, behaviour and treatment",
+    x = NULL, y = NULL
+  ) +
+  ggplot2::theme_minimal(base_size = 10) +
+  ggplot2::theme(
+    panel.grid = ggplot2::element_blank(),
+    axis.text = ggplot2::element_blank(),
+    axis.ticks = ggplot2::element_blank(),
+    strip.text = ggplot2::element_text(face = "bold"),
+    plot.title = ggplot2::element_text(face = "bold")
+  )
+print(design_plot)
 
-# Figure 4. Four proteins with the highest variance among mouse-level averages, shown by class.
+# Figure 4. Boxplots for the four proteins most associated with the eight-class label.
 if (length(selected_proteins)) {
   oldpar <- par(mfrow = c(2, 2), mar = c(8, 4, 4, 1))
   for (p in selected_proteins) {
     boxplot(mouse_means[, p] ~ class_factor, col = class_colors[levels(class_factor)],
             las = 2, xlab = "Class", ylab = "Mouse-level mean protein expression",
             main = p, outline = TRUE,
-            sub = "Selected by variance across mouse-level averages")
+            sub = "Selected by marginal eight-class eta-squared; one point per mouse")
     observed <- !is.na(mouse_means[, p])
     stripchart(split(mouse_means[observed, p], class_factor[observed]),
                vertical = TRUE, method = "jitter", jitter = 0.12, add = TRUE,
@@ -387,7 +438,12 @@ boxplot(list(Genotype = factor_effects$genotype_eta2,
 
 # Figure 6. Proteins with the strongest marginal association with at least one experimental factor.
 factor_eta_columns <- c("genotype_eta2", "treatment_eta2", "behavior_eta2")
-factor_effects_for_plot <- factor_effects
+# Exclude pS6_N from this ranking because it is an exact duplicate of ARC_N.
+duplicate_redundancies <- unique(exact_duplicate_features$protein_2)
+factor_effects_for_plot <- factor_effects[
+  !factor_effects$protein %in% duplicate_redundancies,
+  , drop = FALSE
+]
 factor_eta_matrix_all <- as.matrix(factor_effects_for_plot[, factor_eta_columns, drop = FALSE])
 max_factor_eta2 <- apply(factor_eta_matrix_all, 1, max, na.rm = TRUE)
 top_factor_indices <- order(max_factor_eta2, decreasing = TRUE)[
@@ -459,7 +515,7 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
     print(data.frame(protein = pca_loadings$protein[loading_order],
                      loading = round(pca_loadings[[component]][loading_order], 3)), row.names = FALSE)
   }
-  cat("PCA uses mouse-level means, median imputation and standardisation for descriptive analysis. Exact duplicate columns are excluded. For prediction, fit imputation, scaling and PCA on training folds only.\n")
+  cat("PCA uses mouse-level means and standardisation for description; six highly incomplete proteins and the duplicate pS6_N column are excluded, and two remaining values are median-imputed. For prediction, fit imputation, scaling and PCA on training folds only.\n")
 
   # Figure 7. PCA projection of mouse-level averages, coloured by the eight classes.
   par(mar = c(5, 5, 4, 2), xpd = FALSE)
@@ -515,7 +571,8 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
        las = 1, col = red, col.axis = red)
   mtext("Cumulative variance explained",
         side = 4, line = 3, col = red)
-  # Figure 10. Pairwise-complete correlations among the 20 most variable non-duplicate proteins.
+  # Figure 10. Pairwise-complete correlations among the 20 most variable proteins;
+  # exclude both columns in any exact-duplicate pair so the heatmap has no duplicate axes.
   protein_variances_for_corr <- apply(mouse_means, 2, stats::var, na.rm = TRUE)
   duplicate_proteins <- unique(c(exact_duplicate_features$protein_1,
                                  exact_duplicate_features$protein_2))
