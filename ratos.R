@@ -288,13 +288,18 @@ if (length(top_missing)) {
   }
 }
 
-# Figure 3. Mouse-level distributions of four high-variance proteins across the eight classes.
+# Figure 3. Show individual mice alongside mouse-level protein averages across the eight classes.
 if (length(selected_proteins)) {
   oldpar <- par(mfrow = c(2, 2), mar = c(8, 4, 4, 1))
   for (p in selected_proteins) {
     boxplot(mouse_means[, p] ~ class_factor, col = class_colors[levels(class_factor)],
             las = 2, xlab = "Class", ylab = "Mouse-level mean protein expression",
             main = p, outline = TRUE)
+    observed <- !is.na(mouse_means[, p])
+    stripchart(split(mouse_means[observed, p], class_factor[observed]),
+               vertical = TRUE, method = "jitter", jitter = 0.12, add = TRUE,
+               pch = 21, bg = "white", col = "#333333", cex = 0.8)
+    mtext("Points represent individual mice", side = 3, line = 0.2, cex = 0.7)
   }
   par(oldpar)
 }
@@ -305,10 +310,50 @@ boxplot(list(Genotype = factor_effects$genotype_eta2,
              Treatment = factor_effects$treatment_eta2,
              Behavior = factor_effects$behavior_eta2,
              Eight_classes = factor_effects$eight_class_eta2),
+        names = c("Genotype", "Treatment", "Behaviour", "8 classes"),
         col = c("#4477AA", "#66CCEE", "#228833", "#CC6677"),
         ylab = "Marginal eta-squared across proteins", xlab = "Factor",
         main = "Exploratory per-protein association with each factor",
         las = 2, outline = TRUE)
+
+# Figure 5. Rank proteins by their marginal associations with genotype, treatment, and behaviour.
+factor_eta_columns <- c("genotype_eta2", "treatment_eta2", "behavior_eta2")
+duplicate_redundancies <- unique(exact_duplicate_features$protein_2)
+factor_effects_for_plot <- factor_effects[!factor_effects$protein %in% duplicate_redundancies, , drop = FALSE]
+factor_eta_matrix_all <- as.matrix(factor_effects_for_plot[, factor_eta_columns, drop = FALSE])
+max_factor_eta2 <- apply(factor_eta_matrix_all, 1, max, na.rm = TRUE)
+top_factor_indices <- order(max_factor_eta2, decreasing = TRUE)[
+  seq_len(min(10, nrow(factor_effects_for_plot)))
+]
+top_factor_effects <- factor_effects_for_plot[top_factor_indices,
+                                             c("protein", factor_eta_columns), drop = FALSE]
+rownames(top_factor_effects) <- NULL
+top_factor_eta_matrix <- as.matrix(top_factor_effects[, factor_eta_columns, drop = FALSE])
+top_factor_eta_matrix[!is.finite(top_factor_eta_matrix)] <- NA_real_
+factor_colours <- c("#0072B2", "#D55E00", "#009E73")
+factor_symbols <- c(16, 17, 15)
+n_top_factor_proteins <- nrow(top_factor_effects)
+protein_y_positions <- rev(seq_len(n_top_factor_proteins))
+plot_max_eta2 <- max(top_factor_eta_matrix, na.rm = TRUE)
+par(mar = c(5, 10, 4, 2), xpd = FALSE)
+plot(NA, xlim = c(0, plot_max_eta2 * 1.8),
+     ylim = c(0.5, n_top_factor_proteins + 0.5),
+     xaxt = "s", yaxt = "n", xlab = expression("Marginal " * eta^2), ylab = "",
+     main = "Proteins most associated with each experimental factor")
+abline(v = pretty(c(0, plot_max_eta2)), col = "#E6E6E6", lty = 1)
+axis(2, at = protein_y_positions, labels = top_factor_effects$protein,
+     las = 1, cex.axis = 0.8)
+factor_offsets <- c(-0.16, 0, 0.16)
+for (j in seq_along(factor_eta_columns)) {
+  points(top_factor_eta_matrix[, j], protein_y_positions + factor_offsets[j],
+         pch = factor_symbols[j], col = factor_colours[j], cex = 1.05)
+}
+legend(x = plot_max_eta2 * 1.12, y = n_top_factor_proteins,
+       legend = c("Genotype", "Treatment", "Behaviour"),
+       col = factor_colours, pch = factor_symbols,
+       bty = "n", cex = 0.85, y.intersp = 1.2)
+cat("\nTop proteins by marginal eta-squared for the three experimental factors:\n")
+print(top_factor_effects, row.names = FALSE)
 
 if (nrow(X) >= 3 && ncol(X) >= 2) {
   pca_fit <- stats::prcomp(X, center = TRUE, scale. = TRUE)
@@ -323,7 +368,7 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
                            Treatment = mouse_metadata$Treatment,
                            Behavior = mouse_metadata$Behavior,
                            PC1 = pca_fit$x[, 1], PC2 = pca_fit$x[, 2])
-  cat(sprintf("\nPCA after median imputation and standardization: PC1 %.1f%%; PC2 %.1f%%; combined %.1f%%.\n",
+  cat(sprintf("\nPCA after median imputation and standardisation: PC1 %.1f%%; PC2 %.1f%%; combined %.1f%%.\n",
               100 * pca_variance[1], 100 * pca_variance[2], 100 * sum(pca_variance[1:2])))
   cat("Components needed for 80% / 90% cumulative variance:", n_pc_80, "/", n_pc_90, "\n")
   cat("Largest absolute loadings for PC1 and PC2 (for component interpretation):\n")
@@ -335,36 +380,37 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
   }
   cat("PCA imputation and scaling use all mice for description only; refit them within training folds for prediction.\n")
 
-  # Figure 4. Mouse-level PCA scores show class overlap in the first two components.
-  par(mar = c(5, 5, 4, 10), xpd = TRUE)
+  # Figure 6. Mouse-level PCA scores show class overlap in the first two components.
+  par(mar = c(5, 5, 4, 2), xpd = FALSE)
   plot(pca_scores$PC1, pca_scores$PC2, pch = 19,
        col = class_colors[as.character(pca_scores$class)],
        xlab = sprintf("PC1 (%.1f%%)", 100 * pca_variance[1]),
        ylab = sprintf("PC2 (%.1f%%)", 100 * pca_variance[2]),
        main = "PCA of mouse-level protein averages")
-  legend("topright", inset = c(-0.32, 0), legend = names(class_colors),
-         col = class_colors, pch = 19, bty = "n", cex = 0.85)
+  legend("topright", legend = names(class_colors),
+         col = class_colors, pch = 19, bty = "o", bg = "white",
+         cex = 0.72, ncol = 2)
 
-  # Figure 5. The same PCA scores colored by genotype compare the binary and eight-class questions.
+  # Figure 7. The same PCA scores coloured by genotype compare the binary and eight-class questions.
   genotype_levels <- levels(droplevels(mouse_metadata$Genotype))
   genotype_colors <- setNames(grDevices::hcl.colors(length(genotype_levels), "Set 2"), genotype_levels)
-  par(mar = c(5, 5, 4, 8), xpd = TRUE)
+  par(mar = c(5, 5, 4, 2), xpd = FALSE)
   plot(pca_scores$PC1, pca_scores$PC2, pch = 19,
        col = genotype_colors[as.character(pca_scores$Genotype)],
        xlab = sprintf("PC1 (%.1f%%)", 100 * pca_variance[1]),
        ylab = sprintf("PC2 (%.1f%%)", 100 * pca_variance[2]),
        main = "PCA scores by genotype")
-  legend("topright", inset = c(-0.25, 0), legend = names(genotype_colors),
-         col = genotype_colors, pch = 19, bty = "n", cex = 0.9)
+  legend("topright", legend = names(genotype_colors),
+         col = genotype_colors, pch = 19, bty = "o", bg = "white", cex = 0.85)
 
-  # Figure 6. Proportion of total variance explained by successive principal components.
+  # Figure 8. Proportion of total variance explained by successive principal components.
   par(mar = c(5, 5, 4, 2), xpd = FALSE)
   n_scree <- min(20, length(pca_variance))
   plot(seq_len(n_scree), pca_variance[seq_len(n_scree)], type = "b", pch = 19,
        xlab = "Principal component", ylab = "Proportion of variance explained",
        main = "PCA scree plot")
 
-  # Figure 7. Correlations among the most variable proteins at mouse level.
+  # Figure 9. Correlations among the most variable proteins at mouse level.
   corr_proteins <- names(sort(apply(X, 2, stats::var), decreasing = TRUE))[seq_len(min(20, ncol(X)))]
   corr <- stats::cor(X[, corr_proteins, drop = FALSE])
   all_correlations <- stats::cor(X)
@@ -386,10 +432,12 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
   image(seq_len(ncol(corr)), seq_len(nrow(corr)), t(corr[nrow(corr):1, , drop = FALSE]),
         col = pal, zlim = c(-1, 1), axes = FALSE, xlab = "", ylab = "",
         main = "Correlation heatmap: most variable proteins")
+  mtext("Blue = negative; white = zero; red = positive correlation",
+        side = 3, line = 0.3, cex = 0.75)
   axis(1, at = seq_len(ncol(corr)), labels = colnames(corr), las = 2, cex.axis = 0.7)
   axis(2, at = seq_len(nrow(corr)), labels = rev(rownames(corr)), las = 2, cex.axis = 0.7)
 
-  # Figure 8. Compare average within-mouse spread with between-mouse spread for each protein.
+  # Figure 10. Compare average within-mouse spread with between-mouse spread for each protein.
   valid_variability <- is.finite(variability_by_protein$mean_within_mouse_sd) &
     is.finite(variability_by_protein$between_mouse_sd_of_averages) &
     variability_by_protein$mean_within_mouse_sd > 0 &
@@ -429,4 +477,5 @@ if (interactive()) {
   View(protein_diagnostics, title = "Protein-level diagnostics")
   View(missing_by_mouse, title = "Mouse-level diagnostics")
   View(missingness_by_class, title = "Missingness by class")
+  View(top_factor_effects, title = "Top proteins by factor association")
 }
