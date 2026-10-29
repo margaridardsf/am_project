@@ -1,18 +1,25 @@
 options(stringsAsFactors = FALSE, scipen = 999)
 if (!interactive()) grDevices::pdf(NULL)
 
-if (!requireNamespace("readxl", quietly = TRUE)) {
+user_library <- Sys.getenv("AM_PROJECT_R_LIB", unset = "")
+if (!nzchar(user_library)) {
   user_library <- file.path(
     Sys.getenv("LOCALAPPDATA", unset = path.expand("~")),
     "R", "win-library",
     paste(R.version$major, strsplit(R.version$minor, "\\.")[[1]][1], sep = ".")
   )
-  if (!dir.exists(user_library)) dir.create(user_library, recursive = TRUE, showWarnings = FALSE)
-  .libPaths(c(user_library, .libPaths()))
-  install.packages("readxl", lib = user_library, repos = "https://cloud.r-project.org")
 }
-if (!requireNamespace("readxl", quietly = TRUE)) {
-  stop("Package 'readxl' is required. Install it with install.packages('readxl').")
+if (!dir.exists(user_library)) dir.create(user_library, recursive = TRUE, showWarnings = FALSE)
+.libPaths(c(user_library, .libPaths()))
+
+required_packages <- c("readxl", "ggplot2", "corrplot")
+missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing_packages)) {
+  install.packages(missing_packages, lib = user_library, repos = "https://cloud.r-project.org")
+}
+still_missing <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
+if (length(still_missing)) {
+  stop("Required R packages could not be loaded: ", paste(still_missing, collapse = ", "))
 }
 
 data_path <- "Data_Cortex_Nuclear.xls"
@@ -263,29 +270,39 @@ if (length(top_missing)) {
   mice_ordered <- mice_selected[display_order, , drop = FALSE]
   missing_plot <- missing_plot[mice_to_show, , drop = FALSE][display_order, , drop = FALSE]
   missing_plot_reversed <- missing_plot[nrow(missing_plot):1, , drop = FALSE]
-  missing_colors <- grDevices::colorRampPalette(c("#FFF7F7", "#E58B9A", "#8F1230"))(16)
-  par(mar = c(9, 8, 4, 2))
-  image(x = seq_len(ncol(missing_plot_reversed)), y = seq_len(nrow(missing_plot_reversed)),
-        z = t(missing_plot_reversed), col = missing_colors,
-        breaks = seq(-0.5, 15.5, by = 1), axes = FALSE,
-        xlab = "Protein", ylab = "Mouse (grouped by class)",
-        main = "Missing readings per mouse and protein (each label is out of 15)")
-  mtext("Darker red indicates more missing readings", side = 3, line = 0.3, cex = 0.75)
-  axis(1, at = seq_len(ncol(missing_plot_reversed)), labels = colnames(missing_plot_reversed),
-       las = 2, cex.axis = 0.75)
-  axis(2, at = seq_len(nrow(missing_plot_reversed)), labels = rev(rownames(missing_plot_reversed)),
-       las = 2, cex.axis = 0.6)
-  missing_cells <- which(missing_plot_reversed > 0, arr.ind = TRUE)
-  if (nrow(missing_cells)) {
-    cell_values <- missing_plot_reversed[missing_cells]
-    text(x = missing_cells[, 2], y = missing_cells[, 1], labels = cell_values,
-         cex = 0.58, col = ifelse(cell_values >= 8, "white", "#4A0913"))
-  }
+  missing_long <- as.data.frame(as.table(missing_plot_reversed), stringsAsFactors = FALSE)
+  names(missing_long) <- c("mouse", "protein", "missing_count")
+  missing_long$mouse <- factor(missing_long$mouse, levels = rownames(missing_plot_reversed))
+  missing_long$protein <- factor(missing_long$protein, levels = colnames(missing_plot_reversed))
+  missing_long$cell_label <- ifelse(missing_long$missing_count > 0,
+                                    as.character(missing_long$missing_count), "")
+  missingness_map <- ggplot2::ggplot(missing_long,
+                                    ggplot2::aes(x = protein, y = mouse, fill = missing_count)) +
+    ggplot2::geom_tile(colour = "white", linewidth = 0.25) +
+    ggplot2::geom_text(ggplot2::aes(label = cell_label,
+                                    colour = missing_count >= 8), size = 2.4) +
+    ggplot2::scale_fill_gradientn(colours = c("#FFF7F7", "#E58B9A", "#8F1230"),
+                                  limits = c(0, 15), breaks = c(0, 5, 10, 15),
+                                  name = "Missing readings\n(per protein / mouse)") +
+    ggplot2::scale_colour_manual(values = c("#4A0913", "white"), guide = "none") +
+    ggplot2::scale_x_discrete(position = "bottom") +
+    ggplot2::labs(title = "Missing readings per mouse and protein",
+                  subtitle = "Each mouse has 15 readings per protein",
+                  x = "Protein", y = "Mouse (grouped by class)") +
+    ggplot2::theme_minimal(base_size = 10) +
+    ggplot2::theme(panel.grid = ggplot2::element_blank(),
+                   axis.text.x = ggplot2::element_text(angle = 45, hjust = 1),
+                   axis.text.y = ggplot2::element_text(size = 6.5),
+                   legend.position = "top", legend.justification = "left",
+                   plot.title = ggplot2::element_text(face = "bold"))
   class_breaks <- which(as.character(mice_ordered$class[-1]) !=
                           as.character(mice_ordered$class[-nrow(mice_ordered)]))
   if (length(class_breaks)) {
-    abline(h = nrow(missing_plot_reversed) - class_breaks + 0.5, col = "#555555", lwd = 0.8)
+    missingness_map <- missingness_map +
+      ggplot2::geom_hline(yintercept = nrow(missing_plot_reversed) - class_breaks + 0.5,
+                          colour = "#555555", linewidth = 0.35)
   }
+  print(missingness_map)
 }
 
 # Figure 3. Show individual mice alongside mouse-level protein averages across the eight classes.
@@ -319,7 +336,7 @@ boxplot(list(Genotype = factor_effects$genotype_eta2,
 # Figure 5. Rank proteins by their marginal associations with genotype, treatment, and behaviour.
 factor_eta_columns <- c("genotype_eta2", "treatment_eta2", "behavior_eta2")
 duplicate_redundancies <- unique(exact_duplicate_features$protein_2)
-# Exclude exact duplicate columns so the same protein signal is not ranked twice.
+# Exclude pS6_N here: it is an exact duplicate of ARC_N.
 factor_effects_for_plot <- factor_effects[!factor_effects$protein %in% duplicate_redundancies, , drop = FALSE]
 factor_eta_matrix_all <- as.matrix(factor_effects_for_plot[, factor_eta_columns, drop = FALSE])
 max_factor_eta2 <- apply(factor_eta_matrix_all, 1, max, na.rm = TRUE)
@@ -331,28 +348,41 @@ top_factor_effects <- factor_effects_for_plot[top_factor_indices,
 rownames(top_factor_effects) <- NULL
 top_factor_eta_matrix <- as.matrix(top_factor_effects[, factor_eta_columns, drop = FALSE])
 top_factor_eta_matrix[!is.finite(top_factor_eta_matrix)] <- NA_real_
-factor_colours <- c("#0072B2", "#D55E00", "#009E73")
-factor_symbols <- c(16, 17, 15)
-n_top_factor_proteins <- nrow(top_factor_effects)
-protein_y_positions <- rev(seq_len(n_top_factor_proteins))
+factor_effects_long <- rbind(
+  data.frame(protein = top_factor_effects$protein, Factor = "Genotype",
+             eta_squared = top_factor_effects$genotype_eta2),
+  data.frame(protein = top_factor_effects$protein, Factor = "Treatment",
+             eta_squared = top_factor_effects$treatment_eta2),
+  data.frame(protein = top_factor_effects$protein, Factor = "Behaviour",
+             eta_squared = top_factor_effects$behavior_eta2)
+)
+factor_effects_long$protein <- factor(factor_effects_long$protein,
+                                      levels = rev(top_factor_effects$protein))
+factor_effects_long$Factor <- factor(factor_effects_long$Factor,
+                                     levels = c("Genotype", "Treatment", "Behaviour"))
 plot_max_eta2 <- max(top_factor_eta_matrix, na.rm = TRUE)
-par(mar = c(5, 10, 4, 2), xpd = FALSE)
-plot(NA, xlim = c(0, plot_max_eta2 * 2.5),
-     ylim = c(0.5, n_top_factor_proteins + 0.5),
-     xaxt = "s", yaxt = "n", xlab = expression("Marginal " * eta^2), ylab = "",
-     main = "Proteins most associated with each experimental factor")
-abline(v = pretty(c(0, plot_max_eta2)), col = "#E6E6E6", lty = 1)
-axis(2, at = protein_y_positions, labels = top_factor_effects$protein,
-     las = 1, cex.axis = 0.8)
-factor_offsets <- c(-0.16, 0, 0.16)
-for (j in seq_along(factor_eta_columns)) {
-  points(top_factor_eta_matrix[, j], protein_y_positions + factor_offsets[j],
-         pch = factor_symbols[j], col = factor_colours[j], cex = 1.05)
-}
-legend(x = plot_max_eta2 * 1.12, y = n_top_factor_proteins,
-       legend = c("Genotype", "Treatment", "Behaviour"),
-       col = factor_colours, pch = factor_symbols,
-       bty = "n", cex = 0.85, y.intersp = 1.2)
+axis_max_eta2 <- ceiling(plot_max_eta2 * 10) / 10
+factor_association_plot <- ggplot2::ggplot(
+  factor_effects_long,
+  ggplot2::aes(x = eta_squared, y = protein, colour = Factor, shape = Factor)) +
+  ggplot2::geom_point(size = 2.8, position = ggplot2::position_dodge(width = 0.58)) +
+  ggplot2::scale_colour_manual(values = c(Genotype = "#0072B2", Treatment = "#D55E00",
+                                          Behaviour = "#009E73")) +
+  ggplot2::scale_shape_manual(values = c(Genotype = 16, Treatment = 17, Behaviour = 15)) +
+  ggplot2::scale_x_continuous(limits = c(0, axis_max_eta2),
+                              breaks = seq(0, axis_max_eta2, by = 0.1),
+                              expand = ggplot2::expansion(mult = c(0, 0.01))) +
+  ggplot2::labs(title = "Top protein associations by experimental factor",
+                x = expression("Marginal " * eta^2), y = NULL,
+                colour = NULL, shape = NULL) +
+  ggplot2::guides(colour = ggplot2::guide_legend(nrow = 1, byrow = TRUE),
+                  shape = "none") +
+  ggplot2::theme_minimal(base_size = 11) +
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", hjust = 0.5),
+                 legend.position = "top", legend.justification = "center",
+                 panel.grid.minor = ggplot2::element_blank(),
+                 panel.grid.major.y = ggplot2::element_blank())
+print(factor_association_plot)
 cat("\nTop proteins by marginal eta-squared for the three experimental factors:\n")
 print(top_factor_effects, row.names = FALSE)
 
@@ -412,7 +442,9 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
        main = "PCA scree plot")
 
   # Figure 9. Correlations among the most variable proteins at mouse level.
-  corr_proteins <- names(sort(apply(X, 2, stats::var), decreasing = TRUE))[seq_len(min(20, ncol(X)))]
+  corr_ranked_proteins <- names(sort(apply(X, 2, stats::var), decreasing = TRUE))
+  corr_ranked_proteins <- corr_ranked_proteins[!corr_ranked_proteins %in% duplicate_redundancies]
+  corr_proteins <- corr_ranked_proteins[seq_len(min(20, length(corr_ranked_proteins)))]
   corr <- stats::cor(X[, corr_proteins, drop = FALSE])
   all_correlations <- stats::cor(X)
   correlation_indices <- which(upper.tri(all_correlations), arr.ind = TRUE)
@@ -428,15 +460,12 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
   print(utils::head(correlation_pairs, 6), row.names = FALSE)
   cat("\nProteins included in the correlation heatmap:\n")
   print(corr_proteins)
-  par(mar = c(10, 10, 4, 2))
-  pal <- grDevices::colorRampPalette(c("#4477AA", "white", "#CC6677"))(101)
-  image(seq_len(ncol(corr)), seq_len(nrow(corr)), t(corr[nrow(corr):1, , drop = FALSE]),
-        col = pal, zlim = c(-1, 1), axes = FALSE, xlab = "", ylab = "",
-        main = "Correlation heatmap: most variable proteins")
-  mtext("Blue = negative; white = zero; red = positive correlation",
-        side = 3, line = 0.3, cex = 0.75)
-  axis(1, at = seq_len(ncol(corr)), labels = colnames(corr), las = 2, cex.axis = 0.7)
-  axis(2, at = seq_len(nrow(corr)), labels = rev(rownames(corr)), las = 2, cex.axis = 0.7)
+  corrplot::corrplot(corr, method = "color", type = "full", order = "original",
+                     col = grDevices::colorRampPalette(c("#174A7E", "white", "#A50026"))(201),
+                     col.lim = c(-1, 1), addCoef.col = "#222222", number.digits = 2,
+                     number.cex = 0.62, tl.col = "#222222", tl.srt = 45,
+                     tl.cex = 0.68, cl.pos = "r",
+                     title = "Protein correlations (mouse-level averages)", mar = c(0, 0, 2, 0))
 
   # Figure 10. Compare average within-mouse spread with between-mouse spread for each protein.
   valid_variability <- is.finite(variability_by_protein$mean_within_mouse_sd) &
@@ -451,10 +480,6 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
        ylab = "Mean within-mouse SD across 15 readings",
        main = "Within- versus between-mouse variability")
   abline(0, 1, lty = 2, col = "#CC6677")
-  label_rows <- head(order(variability_plot$within_to_between_sd_ratio, decreasing = TRUE), 5)
-  text(variability_plot$between_mouse_sd_of_averages[label_rows],
-       variability_plot$mean_within_mouse_sd[label_rows],
-       labels = variability_plot$protein[label_rows], pos = 4, cex = 0.65)
 }
 
 cat("\nQuestions for the group:\n")
