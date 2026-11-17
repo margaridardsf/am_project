@@ -21,6 +21,36 @@ still_missing <- required_packages[!vapply(required_packages, requireNamespace, 
 if (length(still_missing)) {
   stop("Required R packages could not be loaded: ", paste(still_missing, collapse = ", "))
 }
+if (!file.exists("project_utils.R")) {
+  stop("Run this script with the project folder as the working directory.")
+}
+source("project_utils.R")
+
+plot_output_dir <- "plots_ratos"
+if (!dir.exists(plot_output_dir)) dir.create(plot_output_dir, recursive = TRUE)
+save_ggplot <- function(plot_object, filename, width = 10, height = 7) {
+  print(plot_object)
+  ggplot2::ggsave(file.path(plot_output_dir, filename), plot = plot_object,
+                  width = width, height = height, units = "in", dpi = 220,
+                  bg = "white")
+}
+save_base_plot <- function(filename, width = 10, height = 7, draw) {
+  output_path <- file.path(plot_output_dir, filename)
+  if (interactive()) {
+    draw()
+    recorded_plot <- grDevices::recordPlot()
+    grDevices::png(output_path, width = width, height = height,
+                   units = "in", res = 220, bg = "white")
+    grDevices::replayPlot(recorded_plot)
+    grDevices::dev.off()
+  } else {
+    grDevices::png(output_path, width = width, height = height,
+                   units = "in", res = 220, bg = "white")
+    draw()
+    grDevices::dev.off()
+  }
+  invisible(output_path)
+}
 
 data_path <- "Data_Cortex_Nuclear.xls"
 if (!file.exists(data_path)) data_path <- file.choose()
@@ -220,12 +250,13 @@ print(utils::head(missing_by_mouse[order(-missing_by_mouse$missing_measurements)
       row.names = FALSE)
 cat("\nMice with no missing protein readings:\n")
 mice_without_missing <- rownames(missing_counts)[rowSums(missing_counts) == 0]
-cat("Mice with missing readings:", nrow(missing_counts) - length(mice_without_missing), "\n")
+cat("Number of mice with no missing readings:", length(mice_without_missing), "of", nrow(missing_counts), "\n")
 cat(if (length(mice_without_missing)) paste(mice_without_missing, collapse = ", ") else "None", "\n")
-cat("Proteins with no missing readings:\n")
+cat("\nProteins with no missing readings:\n")
 proteins_without_missing <- colnames(missing_counts)[colSums(missing_counts) == 0]
-cat("Proteins with missing readings:", ncol(missing_counts) - length(proteins_without_missing), "\n")
+cat("Number of proteins with no missing readings:", length(proteins_without_missing), "of", ncol(missing_counts), "\n")
 cat(if (length(proteins_without_missing)) paste(proteins_without_missing, collapse = ", ") else "None", "\n")
+cat("Number of proteins with at least one missing reading:", proteins_with_missing, "of", ncol(missing_counts), "\n")
 cat("\nMice with at least one missing protein average, by class (descriptive):\n")
 missingness_by_class_print <- data.frame(
   Class = missingness_by_class$class,
@@ -302,13 +333,15 @@ print(selected_proteins)
 # Figure 1. Proteins with the greatest amount of missing measurement data.
 n_show <- min(15, nrow(missing_by_protein))
 miss_plot <- missing_by_protein[seq_len(n_show), ]
-par(mar = c(5, 10, 4, 2))
-bp <- barplot(rev(miss_plot$missing_percent), names.arg = rev(miss_plot$protein), horiz = TRUE,
-              las = 1, col = "#4477AA", border = NA, xlab = "Missing measurements (%)",
-              xlim = c(0, max(miss_plot$missing_percent) * 1.18),
-              main = "Missingness is concentrated in a small set of proteins")
-text(rev(miss_plot$missing_percent), bp,
-     labels = sprintf("%.1f%%", rev(miss_plot$missing_percent)), pos = 4, cex = 0.75)
+save_base_plot("01_missingness_by_protein.png", 11, 8, function() {
+  par(mar = c(5, 10, 4, 2))
+  bp <- barplot(rev(miss_plot$missing_percent), names.arg = rev(miss_plot$protein), horiz = TRUE,
+                las = 1, col = "#4477AA", border = NA, xlab = "Missing measurements (%)",
+                xlim = c(0, max(miss_plot$missing_percent) * 1.18),
+                main = "Missingness is concentrated in a small set of proteins")
+  text(rev(miss_plot$missing_percent), bp,
+       labels = sprintf("%.1f%%", rev(miss_plot$missing_percent)), pos = 4, cex = 0.75)
+})
 
 # Figure 2. Missing readings across mice and proteins.
 missing_plot <- missing_counts
@@ -360,7 +393,7 @@ if (length(class_breaks)) {
       colour = "#555555", linewidth = 0.35
     )
 }
-print(missingness_map)
+save_ggplot(missingness_map, "02_missingness_mouse_protein_map.png", 15, 10)
 
 # Figure 3. Experimental design as a dot matrix: one dot represents one mouse.
 design_plot_data <- mouse_metadata
@@ -405,10 +438,11 @@ design_plot <- ggplot2::ggplot(design_plot_data,
     strip.text = ggplot2::element_text(face = "bold"),
     plot.title = ggplot2::element_text(face = "bold")
   )
-print(design_plot)
+save_ggplot(design_plot, "03_experimental_design.png", 12, 8)
 
 # Figure 4. Boxplots for the four proteins most associated with the eight-class label.
 if (length(selected_proteins)) {
+  save_base_plot("04_selected_protein_boxplots.png", 13, 9, function() {
   oldpar <- par(mfrow = c(2, 2), mar = c(8, 4, 4, 1))
   for (p in selected_proteins) {
     boxplot(mouse_means[, p] ~ class_factor, col = class_colors[levels(class_factor)],
@@ -422,19 +456,22 @@ if (length(selected_proteins)) {
     mtext("Points represent individual mice", side = 3, line = 0.2, cex = 0.7)
   }
   par(oldpar)
+  })
 }
 
 # Figure 5. Distribution of per-protein marginal eta-squared values by factor.
-par(mar = c(6, 5, 4, 2))
-boxplot(list(Genotype = factor_effects$genotype_eta2,
-             Treatment = factor_effects$treatment_eta2,
-             Behavior = factor_effects$behavior_eta2,
-             Eight_classes = factor_effects$eight_class_eta2),
-        names = c("Genotype", "Treatment", "Behaviour", "8 classes"),
-        col = c("#4477AA", "#66CCEE", "#228833", "#CC6677"),
-        ylab = "Marginal eta-squared across proteins", xlab = "Factor",
-        main = "Exploratory per-protein association with each factor",
-        las = 2, outline = TRUE)
+save_base_plot("05_eta_squared_by_factor.png", 9, 7, function() {
+  par(mar = c(6, 5, 4, 2))
+  boxplot(list(Genotype = factor_effects$genotype_eta2,
+               Treatment = factor_effects$treatment_eta2,
+               Behavior = factor_effects$behavior_eta2,
+               Eight_classes = factor_effects$eight_class_eta2),
+          names = c("Genotype", "Treatment", "Behaviour", "8 classes"),
+          col = c("#4477AA", "#66CCEE", "#228833", "#CC6677"),
+          ylab = "Marginal eta-squared across proteins", xlab = "Factor",
+          main = "Exploratory per-protein association with each factor",
+          las = 2, outline = TRUE)
+})
 
 # Figure 6. Proteins with the strongest marginal association with at least one experimental factor.
 factor_eta_columns <- c("genotype_eta2", "treatment_eta2", "behavior_eta2")
@@ -488,7 +525,7 @@ factor_association_plot <- ggplot2::ggplot(
                  legend.position = "top", legend.justification = "center",
                  panel.grid.minor = ggplot2::element_blank(),
                  panel.grid.major.y = ggplot2::element_blank())
-print(factor_association_plot)
+save_ggplot(factor_association_plot, "06_top_factor_associations.png", 12, 8)
 cat("\nTop proteins by marginal eta-squared for the three experimental factors:\n")
 print(top_factor_effects, row.names = FALSE)
 
@@ -517,60 +554,66 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
   }
   cat("PCA uses mouse-level means and standardisation for description; six highly incomplete proteins and the duplicate pS6_N column are excluded, and two remaining values are median-imputed. For prediction, fit imputation, scaling and PCA on training folds only.\n")
 
-  # Figure 7. PCA projection of mouse-level averages, coloured by the eight classes.
-  par(mar = c(5, 5, 4, 2), xpd = FALSE)
-  plot(pca_scores$PC1, pca_scores$PC2, pch = 19,
-       col = class_colors[as.character(pca_scores$class)],
-       xlab = sprintf("PC1 (%.1f%%)", 100 * pca_variance[1]),
-       ylab = sprintf("PC2 (%.1f%%)", 100 * pca_variance[2]),
-       main = "PCA of mouse-level protein averages",
-       sub = "Overlap in PC1-PC2 does not rule out separation in later components")
-  legend("topright", legend = names(class_colors),
-         col = class_colors, pch = 19, bty = "o", bg = "white",
-         cex = 0.72, ncol = 2)
+  # Figure 7. Mouse-level protein profiles projected onto the first two PCs by class.
+  save_base_plot("07_pca_by_eight_class.png", 9, 7, function() {
+    par(mar = c(5, 5, 4, 2), xpd = FALSE)
+    plot(pca_scores$PC1, pca_scores$PC2, pch = 19,
+         col = class_colors[as.character(pca_scores$class)],
+         xlab = sprintf("PC1 (%.1f%%)", 100 * pca_variance[1]),
+         ylab = sprintf("PC2 (%.1f%%)", 100 * pca_variance[2]),
+         main = "PCA of mouse-level protein averages",
+         sub = "Overlap in PC1-PC2 does not rule out separation in later components")
+    legend("topright", legend = names(class_colors),
+           col = class_colors, pch = 19, bty = "o", bg = "white",
+           cex = 0.72, ncol = 2)
+  })
 
   # Figure 8. The same PCA scores coloured by genotype.
   genotype_levels <- levels(droplevels(mouse_metadata$Genotype))
   genotype_colors <- setNames(grDevices::hcl.colors(length(genotype_levels), "Set 2"), genotype_levels)
-  par(mar = c(5, 5, 4, 2), xpd = FALSE)
-  plot(pca_scores$PC1, pca_scores$PC2, pch = 19,
-       col = genotype_colors[as.character(pca_scores$Genotype)],
-       xlab = sprintf("PC1 (%.1f%%)", 100 * pca_variance[1]),
-       ylab = sprintf("PC2 (%.1f%%)", 100 * pca_variance[2]),
-       main = "PCA scores by genotype",
-       sub = "Same two-component projection, coloured by genotype")
-  legend("topright", legend = names(genotype_colors),
-         col = genotype_colors, pch = 19, bty = "o", bg = "white", cex = 0.85)
+  save_base_plot("08_pca_by_genotype.png", 9, 7, function() {
+    par(mar = c(5, 5, 4, 2), xpd = FALSE)
+    plot(pca_scores$PC1, pca_scores$PC2, pch = 19,
+         col = genotype_colors[as.character(pca_scores$Genotype)],
+         xlab = sprintf("PC1 (%.1f%%)", 100 * pca_variance[1]),
+         ylab = sprintf("PC2 (%.1f%%)", 100 * pca_variance[2]),
+         main = "PCA scores by genotype",
+         sub = "Same two-component projection, coloured by genotype")
+    legend("topright", legend = names(genotype_colors),
+           col = genotype_colors, pch = 19, bty = "o", bg = "white", cex = 0.85)
+  })
 
   # Figure 9. Individual and cumulative variance explained.
-  par(mar = c(5, 5, 5, 6), xpd = FALSE)
-  n_scree <- min(20, length(pca_variance))
-  scree_x <- seq_len(n_scree)
-  scree_max <- max(pca_variance[seq_len(n_scree)], na.rm = TRUE) * 1.12
-  red <- "#CC3333"
-  plot(scree_x, pca_variance[seq_len(n_scree)], type = "b", pch = 19,
-       ylim = c(0, scree_max),
-       xlab = "Principal component",
-       ylab = "Individual variance explained",
-       main = "PCA: individual and cumulative variance",
-       cex.main = 1)
-  legend("top", inset = c(0, -0.13), xpd = NA,
-         legend = c("Individual variance", "Cumulative variance",
-                    "70%, 80%, 90% thresholds"),
-         col = c("black", red, red),
-         pch = c(19, 17, NA),
-         lty = c(1, 1, 2),
-         bty = "n", horiz = TRUE, cex = 0.78)
-  abline(h = scree_max * c(0.7, 0.8, 0.9),
-         lty = 2, col = red)
-  lines(scree_x, pca_cumulative[seq_len(n_scree)] * scree_max,
-        type = "b", pch = 17, col = red, lwd = 2)
-  axis(4,
-       at = scree_max * seq(0, 1, by = 0.1),
-       labels = paste0(seq(0, 100, by = 10), "%"),
-       las = 1, col = red, col.axis = red)
-  mtext("Cumulative variance explained",
-        side = 4, line = 3, col = red)
+  save_base_plot("09_pca_scree_cumulative.png", 11, 8, function() {
+    par(mar = c(5, 5, 5, 6), xpd = FALSE)
+    n_scree <- min(20, length(pca_variance))
+    scree_x <- seq_len(n_scree)
+    scree_max <- max(pca_variance[seq_len(n_scree)], na.rm = TRUE) * 1.12
+    red <- "#CC3333"
+    plot(scree_x, pca_variance[seq_len(n_scree)], type = "b", pch = 19,
+         ylim = c(0, scree_max),
+         xlab = "Principal component",
+         ylab = "Individual variance explained",
+         main = "PCA: individual and cumulative variance",
+         cex.main = 1)
+    legend("top", inset = c(0, -0.13), xpd = NA,
+           legend = c("Individual variance", "Cumulative variance",
+                      "70%, 80%, 90% thresholds"),
+           col = c("black", red, red),
+           pch = c(19, 17, NA),
+           lty = c(1, 1, 2),
+           bty = "n", horiz = TRUE, cex = 0.78)
+    abline(h = scree_max * c(0.7, 0.8, 0.9),
+           lty = 2, col = red)
+    lines(scree_x, pca_cumulative[seq_len(n_scree)] * scree_max,
+          type = "b", pch = 17, col = red, lwd = 2)
+    axis(4,
+         at = scree_max * seq(0, 1, by = 0.1),
+         labels = paste0(seq(0, 100, by = 10), "%"),
+         las = 1, col = red, col.axis = red)
+    mtext("Cumulative variance explained",
+          side = 4, line = 3, col = red)
+  })
   # Figure 10. Pairwise-complete correlations among the 20 most variable proteins;
   # exclude both columns in any exact-duplicate pair so the heatmap has no duplicate axes.
   protein_variances_for_corr <- apply(mouse_means, 2, stats::var, na.rm = TRUE)
@@ -610,25 +653,98 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
       max(pairwise_n[upper.tri(pairwise_n)]), "\n", sep = "")
   cat(sprintf("\nCorrelation heatmap: the %d highest-variance non-duplicate proteins; no imputation.\n",
               length(corr_proteins)))
-  corrplot::corrplot(corr, method = "color", type = "full", order = "original",
-                     col = grDevices::colorRampPalette(c("#174A7E", "white", "#A50026"))(201),
-                     col.lim = c(-1, 1), addCoef.col = "#222222", number.digits = 2,
-                     number.cex = 0.62, tl.col = "#222222", tl.srt = 45,
-                     tl.cex = 0.68, cl.pos = "r",
-                     title = "Pairwise-complete protein correlations", mar = c(0, 0, 2, 0))
+  save_base_plot("10_correlation_heatmap_top20_variance.png", 13, 12, function() {
+    corrplot::corrplot(corr, method = "color", type = "full", order = "original",
+                       col = grDevices::colorRampPalette(c("#174A7E", "white", "#A50026"))(201),
+                       col.lim = c(-1, 1), addCoef.col = "#222222", number.digits = 2,
+                       number.cex = 0.62, tl.col = "#222222", tl.srt = 45,
+                       tl.cex = 0.68, cl.pos = "r",
+                       title = "Pairwise-complete protein correlations", mar = c(0, 0, 2, 0))
+  })
+
+  # Figure 11. Compare a robust central interval with the full observed range per mouse.
+  interval_central80 <- am_mouse_intervals(
+    dados, protein_names, mouse_metadata$MouseID,
+    lower_probability = 0.10, upper_probability = 0.90,
+    bounds = "central80"
+  )
+  interval_minmax <- am_mouse_intervals(dados, protein_names,
+                                       mouse_metadata$MouseID, bounds = "minmax")
+  interval_proteins <- head(selected_proteins, 3)
+  interval_width_data <- do.call(rbind, lapply(interval_proteins, function(protein) {
+    data.frame(
+      MouseID = rep(mouse_metadata$MouseID, 2),
+      class = rep(mouse_metadata$class, 2),
+      protein = protein,
+      bound_type = rep(c("Central 80%", "Full range"),
+                       each = nrow(mouse_metadata)),
+      width = c(2 * interval_central80$radius[, protein],
+                2 * interval_minmax$radius[, protein]),
+      stringsAsFactors = FALSE
+    )
+  }))
+  interval_width_data <- interval_width_data[is.finite(interval_width_data$width), , drop = FALSE]
+  interval_width_data$class <- factor(interval_width_data$class, levels = class_levels)
+  interval_summary <- do.call(rbind, lapply(interval_proteins, function(protein) {
+    data.frame(
+      protein = protein,
+      mice_with_any_readings = sum(interval_central80$observed_count[, protein] > 0),
+      minimum_readings_for_one_mouse = min(interval_central80$observed_count[, protein]),
+      median_central80_width = stats::median(2 * interval_central80$radius[, protein], na.rm = TRUE),
+      median_full_range_width = stats::median(2 * interval_minmax$radius[, protein], na.rm = TRUE),
+      stringsAsFactors = FALSE
+    )
+  }))
+  cat("\nInterval-profile summary for the three proteins selected for descriptive boxplots:\n")
+  print(interval_summary, row.names = FALSE)
+  cat("Intervals summarise observed spread across available readings; they are not confidence intervals for a mouse's biological mean. Central 80% bounds reduce sensitivity to single extremes; min–max bounds are shown as a sensitivity comparison.\n")
+
+  interval_width_plot <- ggplot2::ggplot(
+    interval_width_data,
+    ggplot2::aes(x = class, y = width, colour = bound_type)
+  ) +
+    ggplot2::geom_boxplot(
+      ggplot2::aes(group = interaction(class, bound_type)),
+      position = ggplot2::position_dodge(width = 0.82),
+      outlier.shape = NA, alpha = 0.18, linewidth = 0.4
+    ) +
+    ggplot2::geom_point(
+      position = ggplot2::position_jitterdodge(jitter.width = 0.12, dodge.width = 0.82),
+      size = 1.6, alpha = 0.75
+    ) +
+    ggplot2::facet_wrap(~ protein, scales = "free_y", ncol = 1) +
+    ggplot2::scale_colour_manual(values = c(
+      "Central 80%" = "#0072B2",
+      "Full range" = "#D55E00"
+    )) +
+    ggplot2::labs(
+      title = "Within-mouse spread across repeated protein readings",
+      subtitle = "Central 80% uses P10-P90; full range uses min-max. Points are mice; widths are not confidence intervals.",
+      x = "Experimental class", y = "Interval width on the protein scale",
+      colour = "Interval definition"
+    ) +
+    ggplot2::theme_minimal(base_size = 10) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      panel.grid.major.x = ggplot2::element_blank(),
+      axis.text.x = ggplot2::element_text(angle = 35, hjust = 1),
+      legend.position = "top",
+      legend.title = ggplot2::element_text(face = "bold"),
+      plot.title = ggplot2::element_text(face = "bold")
+    )
+  save_ggplot(interval_width_plot, "11_interval_widths_by_class.png", 13, 11)
 
 
 }
 
-cat("\nQuestions for the group:\n")
-cat("1. Keep the eight genotype-treatment-behavior classes as the primary target, with genotype-only as a secondary comparison?\n")
-cat("2. Use mouse-level means as the primary analysis unit and keep each mouse within a single validation fold?\n")
-cat("3. Assess sensitivity to incomplete proteins and compare preprocessing strategies within training folds?\n")
-cat("\nNext: compare supervised classifiers on original and PCA-reduced data using mouse-grouped validation.\n")
+cat("\nFinal-project analysis plan:\n")
+cat("1. Compare the eight experimental classes with the secondary genotype-only task.\n")
+cat("2. Keep one mouse profile per observation and group all data by mouse in every validation fold.\n")
+cat("3. Compare fold-specific missing-data strategies, direct protein profiles, PCA, and repeated-reading interval profiles.\n")
+cat("4. Confirm with the instructor whether the 15 readings should define descriptive intervals or be modelled by their dilution/technical-replicate structure.\n")
 cat(sprintf("With %d proteins and %d mice, standard LDA/QDA covariance estimates may be singular; consider dimension reduction or regularization.\n",
             length(protein_names), nrow(mouse_metadata)))
-cat("\nFive-slide priority: dataset and mouse counts; research questions; missing-count map plus PCA; validation/missingness/dimension challenges; workplan and discussion questions.\n")
-cat("For the five-minute talk, prioritize the missing-count map and eight-class PCA; use the boxplots or factor-effect plot only if time permits.\n")
+cat("\nSaved exploratory figures in:", normalizePath(plot_output_dir, winslash = "/"), "\n")
 
 protein_diagnostics <- merge(missing_by_protein, variability_by_protein, by = "protein", all = TRUE, sort = FALSE)
 protein_diagnostics <- merge(protein_diagnostics, factor_effects, by = "protein", all = TRUE, sort = FALSE)
@@ -638,10 +754,4 @@ if (exists("pca_loadings")) {
                                by = "protein", all = TRUE, sort = FALSE)
 }
 
-if (interactive()) {
-  View(protein_diagnostics, title = "Protein-level diagnostics")
-  View(missing_by_mouse, title = "Mouse-level diagnostics")
-  View(missingness_by_class, title = "Missingness by class")
-  View(top_factor_effects, title = "Top proteins by factor association")
-  View(pairwise_n_table, title = "Pairwise complete observations for correlations")
-}
+cat("Detailed diagnostic tables are printed above; the script does not open a separate data viewer.\n")
