@@ -67,6 +67,10 @@ am_mouse_metadata <- function(data) {
   metadata
 }
 
+# The arithmetic mean is a transparent per-mouse workbook summary. In the source
+# RPPA experiment, the 15 readings comprise a five-point dilution series printed
+# in triplicate (Ahmed et al., 2015, doi:10.1371/journal.pone.0119491); this mean
+# is not a mean of 15 biological replicates.
 am_mouse_means <- function(data, protein_names, mouse_ids = unique(data$MouseID)) {
   result <- matrix(NA_real_, nrow = length(mouse_ids), ncol = length(protein_names),
                    dimnames = list(mouse_ids, protein_names))
@@ -79,6 +83,8 @@ am_mouse_means <- function(data, protein_names, mouse_ids = unique(data$MouseID)
   result
 }
 
+# These intervals describe observed assay-reading spread within each mouse. They
+# are neither confidence intervals nor estimates of biological variability.
 am_mouse_intervals <- function(data, protein_names, mouse_ids = unique(data$MouseID),
                                lower_probability = 0.10, upper_probability = 0.90,
                                bounds = c("central80", "minmax")) {

@@ -69,6 +69,10 @@ if (length(missing_metadata)) {
 
 dados$MeasurementID <- as.character(dados$MouseID)
 dados$MouseID <- sub("_[0-9]+$", "", dados$MeasurementID)
+measurement_index <- as.integer(sub("^.*_([0-9]+)$", "\\1", dados$MeasurementID))
+if (anyNA(measurement_index)) {
+  stop("Measurement IDs must end with a numeric within-mouse suffix.")
+}
 for (v in c("Genotype", "Treatment", "Behavior", "class")) dados[[v]] <- factor(dados[[v]])
 protein_names <- setdiff(names(dados), c(required_metadata, "MeasurementID"))
 if (!length(protein_names)) stop("No protein columns were detected.")
@@ -192,6 +196,31 @@ variability_by_protein <- data.frame(
   stringsAsFactors = FALSE
 )
 variability_by_protein <- variability_by_protein[order(-variability_by_protein$mean_within_mouse_sd), ]
+
+# Ahmed et al. (2015; doi:10.1371/journal.pone.0119491) describe a five-point
+# dilution series printed in triplicate for each sample. Audit whether the numeric
+# workbook suffix is associated with signal changes.
+# This is consistent with an ordered dilution series, but cannot verify which
+# suffixes map to the five dilution levels and three technical replicates.
+measurement_rows_by_mouse <- split(seq_len(nrow(dados)), factor(
+  dados$MouseID, levels = unique(dados$MouseID)
+))
+suffix_order_diagnostics <- do.call(rbind, lapply(protein_names, function(p) {
+  mouse_rhos <- vapply(measurement_rows_by_mouse, function(index) {
+    observed <- is.finite(dados[[p]][index]) & is.finite(measurement_index[index])
+    if (sum(observed) < 5L) return(NA_real_)
+    suppressWarnings(stats::cor(measurement_index[index][observed],
+                                dados[[p]][index][observed], method = "spearman"))
+  }, numeric(1))
+  data.frame(
+    protein = p,
+    median_within_mouse_spearman = stats::median(mouse_rhos, na.rm = TRUE),
+    mice_with_estimable_rho = sum(is.finite(mouse_rhos)),
+    percent_mouse_profiles_decreasing = 100 * mean(mouse_rhos < 0, na.rm = TRUE),
+    stringsAsFactors = FALSE
+  )
+}))
+
 eta_squared <- function(x, group) {
   keep <- !is.na(x) & !is.na(group)
   x <- x[keep]
@@ -221,6 +250,22 @@ cat("Measurement rows:", nrow(dados), "| Mice:", nrow(mouse_metadata),
     "| Proteins:", length(protein_names), "| Classes:", nlevels(droplevels(dados$class)), "\n")
 cat("Measurements per mouse (min-max):", min(measurements_per_mouse), "-",
     max(measurements_per_mouse), "\n\n")
+cat("Measurement structure: the original RPPA study describes 15 readings per sample as three technical replicates across a five-point dilution series. The workbook has numeric within-mouse suffixes but no explicit dilution or replicate columns. Arithmetic means and intervals therefore summarise assay readings across the series; they are not biological-replicate uncertainty intervals.\n")
+cat("The suffix-order trend check below is exploratory only; it cannot establish the exact mapping from suffixes to dilution levels and technical replicates.\n")
+cat("\nSuffix-order signal diagnostic (within-mouse Spearman correlations, descriptive):\n")
+cat(sprintf("Median of protein-level median correlations: %.3f; proteins with a negative median: %d/%d; median percentage of mice with a negative profile correlation: %.1f%%.\n",
+            stats::median(suffix_order_diagnostics$median_within_mouse_spearman, na.rm = TRUE),
+            sum(suffix_order_diagnostics$median_within_mouse_spearman < 0, na.rm = TRUE),
+            nrow(suffix_order_diagnostics),
+            stats::median(suffix_order_diagnostics$percent_mouse_profiles_decreasing, na.rm = TRUE)))
+cat("This positional pattern is compatible with a dilution series, but is not a substitute for dilution metadata or calibration.\n")
+within_sd_lower_count <- sum(
+  variability_by_protein$mean_within_mouse_sd < variability_by_protein$between_mouse_sd_of_averages,
+  na.rm = TRUE
+)
+cat(sprintf("\nDescriptive spread check: mean within-mouse SD across the 15 assay readings is below the between-mouse SD of the 15-reading arithmetic means for %d/%d proteins. This is not a biological within-versus-between variance decomposition: the within-mouse spread includes dilution response and technical-replicate variation.\n",
+            within_sd_lower_count, sum(is.finite(variability_by_protein$mean_within_mouse_sd) &
+                                         is.finite(variability_by_protein$between_mouse_sd_of_averages))))
 cat("Class counts (two rows: mice and measurement rows):\n")
 print(class_counts)
 cat("\nMouse counts by experimental factor:\n")
@@ -276,6 +321,7 @@ eta_summary <- data.frame(
 eta_summary$median_eta2 <- round(eta_summary$median_eta2, 3)
 print(eta_summary, row.names = FALSE)
 cat("These marginal effect sizes describe association with each factor; they are not classifier accuracy or adjusted causal effects.\n")
+cat("They use per-mouse arithmetic averages across the 15 workbook assay readings; interpretation is provisional until the dilution and replicate mapping is confirmed.\n")
 
 cat(sprintf("\nSlide-ready summary: %d mice, %d proteins, %d classes; %d-%d measurements per mouse; %.2f%% of protein readings are missing.\n",
             nrow(mouse_metadata), length(protein_names), nlevels(droplevels(mouse_metadata$class)),
@@ -446,9 +492,9 @@ if (length(selected_proteins)) {
   oldpar <- par(mfrow = c(2, 2), mar = c(8, 4, 4, 1))
   for (p in selected_proteins) {
     boxplot(mouse_means[, p] ~ class_factor, col = class_colors[levels(class_factor)],
-            las = 2, xlab = "Class", ylab = "Mouse-level mean protein expression",
+            las = 2, xlab = "Class", ylab = "Per-mouse mean of observed assay readings",
             main = p, outline = TRUE,
-            sub = "Selected by marginal eight-class eta-squared; one point per mouse")
+            sub = "Descriptive arithmetic summary across the dilution series; one point per mouse")
     observed <- !is.na(mouse_means[, p])
     stripchart(split(mouse_means[observed, p], class_factor[observed]),
                vertical = TRUE, method = "jitter", jitter = 0.12, add = TRUE,
@@ -461,7 +507,7 @@ if (length(selected_proteins)) {
 
 # Figure 5. Distribution of per-protein marginal eta-squared values by factor.
 save_base_plot("05_eta_squared_by_factor.png", 9, 7, function() {
-  par(mar = c(6, 5, 4, 2))
+  par(mar = c(8, 5, 4, 2))
   boxplot(list(Genotype = factor_effects$genotype_eta2,
                Treatment = factor_effects$treatment_eta2,
                Behavior = factor_effects$behavior_eta2,
@@ -470,7 +516,9 @@ save_base_plot("05_eta_squared_by_factor.png", 9, 7, function() {
           col = c("#4477AA", "#66CCEE", "#228833", "#CC6677"),
           ylab = "Marginal eta-squared across proteins", xlab = "Factor",
           main = "Exploratory per-protein association with each factor",
-          las = 2, outline = TRUE)
+          las = 1, outline = TRUE)
+    mtext("Associations use per-mouse means across available assay readings",
+          side = 1, line = 7, cex = 0.78)
 })
 
 # Figure 6. Proteins with the strongest marginal association with at least one experimental factor.
@@ -516,6 +564,7 @@ factor_association_plot <- ggplot2::ggplot(
                               breaks = seq(0, axis_max_eta2, by = 0.1),
                               expand = ggplot2::expansion(mult = c(0, 0.01))) +
   ggplot2::labs(title = "Top protein associations by experimental factor",
+                subtitle = "Top 10 by maximum marginal eta-squared; per-mouse assay-reading means; descriptive associations",
                 x = expression("Marginal " * eta^2), y = NULL,
                 colour = NULL, shape = NULL) +
   ggplot2::guides(colour = ggplot2::guide_legend(nrow = 1, byrow = TRUE),
@@ -552,7 +601,7 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
     print(data.frame(protein = pca_loadings$protein[loading_order],
                      loading = round(pca_loadings[[component]][loading_order], 3)), row.names = FALSE)
   }
-  cat("PCA uses mouse-level means and standardisation for description; six highly incomplete proteins and the duplicate pS6_N column are excluded, and two remaining values are median-imputed. For prediction, fit imputation, scaling and PCA on training folds only.\n")
+  cat("PCA uses standardised per-mouse arithmetic means across the available workbook readings for description; this summary combines the dilution series and technical replicates. Six highly incomplete proteins and the duplicate pS6_N column are excluded, and two remaining values are median-imputed. For prediction, fit imputation, scaling and PCA on training folds only.\n")
 
   # Figure 7. Mouse-level protein profiles projected onto the first two PCs by class.
   save_base_plot("07_pca_by_eight_class.png", 9, 7, function() {
@@ -561,8 +610,8 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
          col = class_colors[as.character(pca_scores$class)],
          xlab = sprintf("PC1 (%.1f%%)", 100 * pca_variance[1]),
          ylab = sprintf("PC2 (%.1f%%)", 100 * pca_variance[2]),
-         main = "PCA of mouse-level protein averages",
-         sub = "Overlap in PC1-PC2 does not rule out separation in later components")
+         main = "PCA of per-mouse assay-reading means",
+         sub = "Assay-reading summaries; overlap in PC1-PC2 does not rule out later separation")
     legend("topright", legend = names(class_colors),
            col = class_colors, pch = 19, bty = "o", bg = "white",
            cex = 0.72, ncol = 2)
@@ -594,7 +643,7 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
          ylim = c(0, scree_max),
          xlab = "Principal component",
          ylab = "Individual variance explained",
-         main = "PCA: individual and cumulative variance",
+         main = "PCA of per-mouse assay-reading means: individual and cumulative variance",
          cex.main = 1)
     legend("top", inset = c(0, -0.13), xpd = NA,
            legend = c("Individual variance", "Cumulative variance",
@@ -646,7 +695,7 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
   correlation_pairs <- correlation_pairs[is.finite(correlation_pairs$correlation), , drop = FALSE]
   correlation_pairs <- correlation_pairs[order(-abs(correlation_pairs$correlation)), ]
   correlation_pairs$correlation <- round(correlation_pairs$correlation, 3)
-  cat("\nStrongest absolute protein correlations (pairwise complete mouse averages; no imputation):\n")
+  cat("\nStrongest absolute protein correlations (pairwise-complete per-mouse 15-reading averages; no imputation):\n")
   print(utils::head(correlation_pairs, 8), row.names = FALSE)
   cat("\nNumber of complete mouse pairs for correlations in the heatmap (range): ",
       min(pairwise_n[upper.tri(pairwise_n)]), "-",
@@ -659,7 +708,7 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
                        col.lim = c(-1, 1), addCoef.col = "#222222", number.digits = 2,
                        number.cex = 0.62, tl.col = "#222222", tl.srt = 45,
                        tl.cex = 0.68, cl.pos = "r",
-                       title = "Pairwise-complete protein correlations", mar = c(0, 0, 2, 0))
+                title = "Correlations between per-mouse 15-reading means", mar = c(0, 0, 2, 0))
   })
 
   # Figure 11. Compare a robust central interval with the full observed range per mouse.
@@ -718,9 +767,9 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
       "Full range" = "#D55E00"
     )) +
     ggplot2::labs(
-      title = "Within-mouse spread across repeated protein readings",
-      subtitle = "Central 80% uses P10-P90; full range uses min-max. Points are mice; widths are not confidence intervals.",
-      x = "Experimental class", y = "Interval width on the protein scale",
+      title = "Assay-reading spread across the 15 within-mouse measurements",
+      subtitle = "Three technical replicates across five dilution levels; widths summarise assay readings, not biological uncertainty.",
+      x = "Experimental class", y = "Observed interval width on the protein scale",
       colour = "Interval definition"
     ) +
     ggplot2::theme_minimal(base_size = 10) +
@@ -737,11 +786,45 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
 
 }
 
+# Figure 12. Within-mouse association between protein signal and workbook suffix.
+suffix_order_diagnostics$trend <- ifelse(
+  suffix_order_diagnostics$median_within_mouse_spearman < 0,
+  "Negative median trend", "Non-negative median trend"
+)
+suffix_order_diagnostics$protein <- stats::reorder(
+  suffix_order_diagnostics$protein,
+  suffix_order_diagnostics$median_within_mouse_spearman
+)
+suffix_order_plot <- ggplot2::ggplot(
+  suffix_order_diagnostics,
+  ggplot2::aes(x = median_within_mouse_spearman, y = protein, colour = trend)
+) +
+  ggplot2::geom_vline(xintercept = 0, colour = "#777777", linetype = "dashed") +
+  ggplot2::geom_point(size = 2.1) +
+  ggplot2::scale_colour_manual(values = c(
+    "Negative median trend" = "#0072B2",
+    "Non-negative median trend" = "#D55E00"
+  )) +
+  ggplot2::labs(
+    title = "Protein signals often decrease across workbook suffix order",
+    subtitle = "Each dot is the median within-mouse Spearman correlation across mice; consistent with, but not proof of, dilution order.",
+    x = "Median within-mouse Spearman correlation with numeric suffix (1-15)",
+    y = "Protein", colour = "Trend"
+  ) +
+  ggplot2::theme_minimal(base_size = 9) +
+  ggplot2::theme(
+    panel.grid.minor = ggplot2::element_blank(),
+    panel.grid.major.y = ggplot2::element_blank(),
+    legend.position = "top",
+    plot.title = ggplot2::element_text(face = "bold")
+  )
+save_ggplot(suffix_order_plot, "12_measurement_suffix_trend.png", 12, 14)
+
 cat("\nFinal-project analysis plan:\n")
 cat("1. Compare the eight experimental classes with the secondary genotype-only task.\n")
 cat("2. Keep one mouse profile per observation and group all data by mouse in every validation fold.\n")
 cat("3. Compare fold-specific missing-data strategies, direct protein profiles, PCA, and repeated-reading interval profiles.\n")
-cat("4. Confirm with the instructor whether the 15 readings should define descriptive intervals or be modelled by their dilution/technical-replicate structure.\n")
+cat("4. Confirm the workbook suffix-to-dilution/replicate mapping and whether the 15 readings should be modelled by their assay structure or summarised with descriptive intervals.\n")
 cat(sprintf("With %d proteins and %d mice, standard LDA/QDA covariance estimates may be singular; consider dimension reduction or regularization.\n",
             length(protein_names), nrow(mouse_metadata)))
 cat("\nSaved exploratory figures in:", normalizePath(plot_output_dir, winslash = "/"), "\n")

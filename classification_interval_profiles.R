@@ -41,16 +41,18 @@ make_interval_features <- function(interval_object, protein_names) {
 }
 
 feature_sets <- list(
-  "Mean profile" = mouse_means,
-  "Central 80% interval" = make_interval_features(central_intervals, protein_names),
-  "Full min-max interval" = make_interval_features(full_range_intervals, protein_names)
+  "15-reading mean" = mouse_means,
+  "Central 80% reading interval" = make_interval_features(central_intervals, protein_names),
+  "Full observed reading range" = make_interval_features(full_range_intervals, protein_names)
 )
 
 cat("INTERVAL-PROFILE CLASSIFICATION: MOUSE-GROUPED NESTED CROSS-VALIDATION\n")
 cat("Source workbook:", source_data$source_path, "\n")
 cat("Each mouse contributes one feature profile; no mouse can be split across folds.\n")
-cat("The 10th–90th percentile bounds describe a central 80% of available readings. Min–max bounds are a sensitivity analysis. Neither is a confidence interval for a biological mean.\n")
-cat("For interval profiles, radius/sqrt(3) represents the uniform-within-interval Wasserstein coordinate; the uniform assumption is explicit and should be confirmed with the instructor.\n")
+cat("The source RPPA study describes three technical replicates across five dilution levels for each mouse. The workbook has no explicit dilution/replicate columns, so the 15-reading mean and intervals combine assay readings across that structure.\n")
+cat("The 10th–90th percentile bounds describe the central spread of available assay readings; min–max bounds are a sensitivity analysis. Neither is a confidence interval or estimate of biological within-mouse variability.\n")
+cat("Until the numeric suffixes are mapped to dilution levels and technical replicates, treat all comparisons in this script as sensitivity analyses of alternative mouse-level assay-profile summaries.\n")
+cat("For interval profiles, radius/sqrt(3) gives the Euclidean coordinate for the Wasserstein-2 distance between uniform distributions on intervals. Applying that geometry to these empirical assay-reading ranges is an explicit modelling assumption, not a property established by the data.\n")
 cat("The PIC iJRR scripts concern interval-valued regression, not classification. This analysis reuses centre/radius representation only; it does not transfer the regression model.\n")
 cat("All feature filtering and imputation use the training fold only. Proteins with >5% missing mouse profiles are removed within that fold; remaining gaps use training-fold medians without class labels.\n")
 cat("Models: RBF SVM and Random Forest on interval features, plus a distance-based kNN classifier as a simple interval-aware comparator.\n\n")
@@ -118,22 +120,22 @@ performance_plot <- ggplot2::ggplot(
   ) +
   ggplot2::facet_grid(metric ~ target_plot) +
   ggplot2::scale_colour_manual(values = c(
-    "Mean profile" = "#009E73",
-    "Central 80% interval" = "#0072B2",
-    "Full min-max interval" = "#D55E00"
+    "15-reading mean" = "#009E73",
+    "Central 80% reading interval" = "#0072B2",
+    "Full observed reading range" = "#D55E00"
   )) +
   ggplot2::scale_shape_manual(values = c(
-    "Mean profile" = 16,
-    "Central 80% interval" = 17,
-    "Full min-max interval" = 15
+    "15-reading mean" = 16,
+    "Central 80% reading interval" = 17,
+    "Full observed reading range" = 15
   )) +
   ggplot2::scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2),
                               expand = ggplot2::expansion(mult = c(0, 0.02))) +
   ggplot2::labs(
-    title = "Does within-mouse interval information help classification?",
-    subtitle = "Points show mean performance over five repeated nested grouped-CV runs; error bars show one standard deviation",
-    x = NULL, y = "Performance", colour = "Mouse-level representation",
-    shape = "Mouse-level representation"
+    title = "Sensitivity to alternative 15-reading assay-profile summaries",
+    subtitle = "Intervals summarise readings across technical replicates and dilution levels; error bars show one SD across five grouped-CV runs",
+    x = NULL, y = "Performance", colour = "Assay-profile summary",
+    shape = "Assay-profile summary"
   ) +
   ggplot2::theme_minimal(base_size = 10) +
   ggplot2::theme(
@@ -178,7 +180,7 @@ for (target_name in targets) {
                                  breaks = seq(0, 1, 0.25), labels = scales::percent) +
     ggplot2::coord_equal() +
     ggplot2::labs(
-      title = paste("Out-of-fold interval-profile confusion matrix:",
+      title = paste("Out-of-fold assay-profile confusion matrix:",
                     if (target_name == "class") "eight-class label" else target_name),
       subtitle = paste0("Selected after comparison: ", selected$representation,
                         " / ", selected$classifier,
@@ -202,10 +204,11 @@ for (target_name in targets) {
 }
 
 cat("\nInterval meaning and limitations:\n")
-cat("- The 15 workbook rows are treated as repeated measurements within one mouse, not as 15 independent mice.\n")
-cat("- A 10th–90th percentile interval is a robust summary of the central spread among available readings.\n")
-cat("- A min–max interval is sensitive to extreme assay readings and is included only as a sensitivity comparison.\n")
+cat("- The original RPPA study describes each mouse's 15 readings as three technical replicates across a five-point dilution series; they are not 15 independent mice.\n")
+cat("- The workbook does not label dilution level or technical replicate separately. The numeric suffix order is suggestive, but its exact mapping has not been verified.\n")
+cat("- A 10th–90th percentile interval summarises central assay-reading spread; min–max is sensitive to extremes and is included only as a sensitivity comparison.\n")
+cat("- Both interval definitions combine dilution response and technical-replicate variation; neither measures biological uncertainty.\n")
 cat("- The centre/radius representation with radius divided by sqrt(3) corresponds to a uniform-within-interval Wasserstein distance; it is a modelling assumption, not an empirically verified distribution.\n")
 cat("- The original PIC interval joint robust regression is a regression method and is not used as a classifier.\n")
-cat("- Ask the instructor whether the five dilution levels and three technical replicates should be represented separately before treating the interval models as a primary result.\n")
+cat("- Ask the instructor to confirm the suffix-to-dilution/replicate mapping and whether to model those components separately before treating interval models as a primary result.\n")
 cat("Saved interval-classification figures in:", normalizePath(plot_output_dir, winslash = "/"), "\n")

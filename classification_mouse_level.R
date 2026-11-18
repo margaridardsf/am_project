@@ -28,8 +28,9 @@ if (nrow(mouse_profiles) != 72L || anyDuplicated(mouse_metadata$MouseID)) {
 }
 cat("MOUSE-LEVEL CLASSIFICATION: NESTED, MOUSE-GROUPED CROSS-VALIDATION\n")
 cat("Source workbook:", source_data$source_path, "\n")
-cat("One mean protein profile per mouse:", nrow(mouse_profiles), "mice x",
+cat("One arithmetic mean profile of up to 15 assay readings per mouse:", nrow(mouse_profiles), "mice x",
     ncol(mouse_profiles), "proteins.\n")
+cat("The source study describes three technical replicates across five dilution levels per mouse. The workbook lacks explicit dilution/replicate identifiers, so these means are pragmatic baseline features, not biological means from 15 independent replicates.\n")
 cat("No class labels, behaviour labels, treatment labels or mouse IDs are predictors.\n")
 cat("Each validation fold holds out whole mouse profiles; preprocessing and tuning are refitted within training folds.\n")
 cat("Comparison: all predictors with training-fold median imputation versus removal of proteins with >5% missing mouse averages; direct profiles versus PCA retaining 90% of training variance.\n")
@@ -118,7 +119,7 @@ performance_plot <- ggplot2::ggplot(
                               expand = ggplot2::expansion(mult = c(0, 0.02))) +
   ggplot2::labs(
     title = "Mouse-level classification performance",
-    subtitle = "Points show mean performance over five repeated nested grouped-CV runs; error bars show one standard deviation",
+    subtitle = "Predictors are per-mouse arithmetic means across up to 15 assay readings; error bars show one SD across five nested grouped-CV runs",
     x = NULL, y = "Performance", colour = "Missing-data strategy", shape = "Predictor representation"
   ) +
   ggplot2::theme_minimal(base_size = 10) +
