@@ -523,7 +523,7 @@ am_run_nested_group_cv <- function(x, metadata, target_name,
           inner_predicted <- c(inner_predicted, try_result$predicted)
         }
         if (!candidate_failed && length(inner_observed) == length(train_target)) {
-          scores <- am_classification_metrics(train_target, inner_predicted,
+          scores <- am_classification_metrics(inner_observed, inner_predicted,
                                               class_levels = levels(target))
           candidate_scores[candidate_id] <- scores[["macro_f1"]]
           candidate_balanced[candidate_id] <- scores[["balanced_accuracy"]]

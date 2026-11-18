@@ -94,6 +94,7 @@ print(model_summary_print, row.names = FALSE)
 cat("\nThe eight-class task is primary; genotype and behaviour-protocol tasks are secondary factor-wise comparisons.\n")
 cat("Balanced accuracy and macro-F1 weight classes equally; accuracy is included for context.\n")
 cat("The reported SD measures variation across repeated partitions, not a formal confidence interval.\n")
+cat("Selecting the highest-scoring configuration after comparing outer-CV summaries is exploratory and may be optimistic; there is no external test cohort.\n")
 cat("Reference balanced-accuracy levels are 1/8 for the eight-class task and 1/2 for each binary task.\n")
 for (target_name in targets) {
   target_counts <- table(mouse_metadata[[target_name]])
