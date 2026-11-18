@@ -22,6 +22,10 @@ protein_names <- source_data$protein_names
 mouse_metadata <- am_mouse_metadata(raw_data)
 mouse_means <- am_mouse_means(raw_data, protein_names, mouse_metadata$MouseID)
 mouse_metadata <- mouse_metadata[match(rownames(mouse_means), mouse_metadata$MouseID), , drop = FALSE]
+if (nrow(raw_data) != 1080L || nrow(mouse_means) != 72L ||
+    ncol(mouse_means) != 77L || anyDuplicated(mouse_metadata$MouseID)) {
+  stop("Expected the project workbook version with 1,080 rows, 72 mice and 77 proteins.")
+}
 
 central_intervals <- am_mouse_intervals(
   raw_data, protein_names, mouse_metadata$MouseID,
@@ -55,15 +59,22 @@ cat("Until the numeric suffixes are mapped to dilution levels and technical repl
 cat("For interval profiles, radius/sqrt(3) gives the Euclidean coordinate for the Wasserstein-2 distance between uniform distributions on intervals. Applying that geometry to these empirical assay-reading ranges is an explicit modelling assumption, not a property established by the data.\n")
 cat("The PIC iJRR scripts concern interval-valued regression, not classification. This analysis reuses centre/radius representation only; it does not transfer the regression model.\n")
 cat("All feature filtering and imputation use the training fold only. Proteins with >5% missing mouse profiles are removed within that fold; remaining gaps use training-fold medians without class labels.\n")
-cat("Models: RBF SVM and Random Forest on interval features, plus a distance-based kNN classifier as a simple interval-aware comparator.\n\n")
+cat("The behaviour target is the experimental protocol label; it does not indicate whether a mouse actually learnt.\n")
+cat("Models: RBF SVM, class-weighted Random Forest, regularised logistic regression and distance-weighted kNN.\n")
+cat("Eight-class logistic fits are exploratory because inner training folds contain fewer than eight mice per class.\n")
+cat("The same class-stratified mouse folds are reused across targets, models and feature summaries for paired comparisons.\n\n")
 
-targets <- c("class", "Genotype")
-classifiers <- c("SVM", "RandomForest", "kNN")
-repeats <- 5L
+targets <- c("class", "Genotype", "Behavior")
+target_display <- c(class = "Eight-class label", Genotype = "Genotype",
+                    Behavior = "Behaviour protocol")
+classifiers <- c("SVM", "RandomForest", "RegularisedLogistic", "kNN")
+repeats <- suppressWarnings(as.integer(Sys.getenv("AM_PROJECT_CV_REPEATS", "5")))
+if (is.na(repeats) || repeats < 1L) stop("AM_PROJECT_CV_REPEATS must be a positive integer.")
 outer_folds <- 5L
 inner_folds <- 3L
 analysis_results <- list()
 result_index <- 0L
+analysis_start <- proc.time()[["elapsed"]]
 total_analyses <- length(targets) * length(feature_sets) * length(classifiers)
 
 for (target_name in targets) {
@@ -78,7 +89,8 @@ for (target_name in targets) {
         missing_strategy = "remove_sparse",
         representation = "raw", method = classifier,
         repeats = repeats, outer_folds = outer_folds,
-        inner_folds = inner_folds, seed = 20261117L, verbose = FALSE
+        inner_folds = inner_folds, seed = 20261117L, verbose = FALSE,
+        stratify_name = "class"
       )
       result$predictions$representation <- basis_name
       result$repeat_metrics$representation <- basis_name
@@ -96,6 +108,63 @@ cat("\nGrouped nested-CV results by feature representation:\n")
 print(model_summary_print, row.names = FALSE)
 cat("\nThe mean-profile baseline and interval models use the same mice and grouped folds.\n")
 cat("Scores are internal estimates; differences should be read cautiously because only 72 mice are available.\n")
+cat("Reference balanced accuracy is 1/8 for the eight-class task and 1/2 for each binary task.\n")
+for (target_name in targets) {
+  target_counts <- table(mouse_metadata[[target_name]])
+  cat(sprintf("  %s: %s mice per class; majority-class accuracy reference %.3f.\n",
+              target_display[[target_name]],
+              paste(paste(names(target_counts), as.integer(target_counts), sep = "="),
+                    collapse = ", "),
+              max(target_counts) / sum(target_counts)))
+}
+
+repeat_metrics <- do.call(rbind, lapply(analysis_results, `[[`, "repeat_metrics"))
+mean_metrics <- repeat_metrics[
+  repeat_metrics$representation == "15-reading mean",
+  c("target", "classifier", "repeat_id", "balanced_accuracy", "macro_f1"),
+  drop = FALSE
+]
+interval_metrics <- repeat_metrics[repeat_metrics$representation != "15-reading mean", , drop = FALSE]
+paired_metrics <- merge(
+  interval_metrics, mean_metrics,
+  by = c("target", "classifier", "repeat_id"),
+  suffixes = c("_summary", "_mean")
+)
+paired_metrics$delta_balanced_accuracy <-
+  paired_metrics$balanced_accuracy_summary - paired_metrics$balanced_accuracy_mean
+paired_metrics$delta_macro_f1 <- paired_metrics$macro_f1_summary - paired_metrics$macro_f1_mean
+paired_groups <- interaction(paired_metrics$target, paired_metrics$representation,
+                             paired_metrics$classifier, drop = TRUE)
+paired_summary <- do.call(rbind, lapply(split(paired_metrics, paired_groups), function(rows) {
+  data.frame(
+    target = rows$target[1], representation = rows$representation[1],
+    classifier = rows$classifier[1],
+    mean_delta_balanced_accuracy = mean(rows$delta_balanced_accuracy),
+    sd_delta_balanced_accuracy = stats::sd(rows$delta_balanced_accuracy),
+    mean_delta_macro_f1 = mean(rows$delta_macro_f1),
+    sd_delta_macro_f1 = stats::sd(rows$delta_macro_f1),
+    stringsAsFactors = FALSE
+  )
+}))
+paired_summary <- paired_summary[order(paired_summary$target,
+                                       paired_summary$classifier,
+                                       paired_summary$representation), , drop = FALSE]
+paired_summary_print <- paired_summary
+paired_columns <- grep("^(mean|sd)_delta_", names(paired_summary_print), value = TRUE)
+paired_summary_print[paired_columns] <- lapply(paired_summary_print[paired_columns], round, 3)
+cat("\nPaired change versus the 15-reading mean (interval minus mean; same held-out mice):\n")
+print(paired_summary_print, row.names = FALSE)
+cat("These repeat-level differences describe sensitivity to representation; their SDs are not confidence intervals.\n")
+
+failed_candidate_fits <- sum(vapply(analysis_results, `[[`, integer(1), "errors"))
+cat("Failed inner-fold candidate fits handled during tuning:", failed_candidate_fits, "\n")
+if (failed_candidate_fits > 0L) {
+  failure_messages <- unique(unlist(lapply(analysis_results, `[[`, "error_messages")))
+  cat("Distinct candidate-fit messages:\n")
+  print(failure_messages)
+}
+cat(sprintf("Nested-CV analysis elapsed time: %.1f minutes.\n",
+            (proc.time()[["elapsed"]] - analysis_start) / 60))
 
 performance_long <- rbind(
   data.frame(model_summary[, c("target", "representation", "classifier")],
@@ -105,8 +174,9 @@ performance_long <- rbind(
              metric = "Macro-F1", mean = model_summary$mean_macro_f1,
              sd = model_summary$sd_macro_f1)
 )
-performance_long$target_plot <- ifelse(
-  performance_long$target == "class", "Eight-class label", "Genotype"
+performance_long$target_plot <- factor(
+  unname(target_display[performance_long$target]),
+  levels = unname(target_display[targets])
 )
 performance_plot <- ggplot2::ggplot(
   performance_long,
@@ -133,7 +203,7 @@ performance_plot <- ggplot2::ggplot(
                               expand = ggplot2::expansion(mult = c(0, 0.02))) +
   ggplot2::labs(
     title = "Sensitivity to alternative 15-reading assay-profile summaries",
-    subtitle = "Intervals summarise readings across technical replicates and dilution levels; error bars show one SD across five grouped-CV runs",
+    subtitle = "Interval summaries describe assay-reading spread; error bars show SD across grouped-CV runs",
     x = NULL, y = "Performance", colour = "Assay-profile summary",
     shape = "Assay-profile summary"
   ) +
@@ -181,7 +251,7 @@ for (target_name in targets) {
     ggplot2::coord_equal() +
     ggplot2::labs(
       title = paste("Out-of-fold assay-profile confusion matrix:",
-                    if (target_name == "class") "eight-class label" else target_name),
+                    target_display[[target_name]]),
       subtitle = paste0("Selected after comparison: ", selected$representation,
                         " / ", selected$classifier,
                         "\nCounts and row percentages pool repeated out-of-fold predictions; descriptive only"),
@@ -194,7 +264,7 @@ for (target_name in targets) {
       plot.title = ggplot2::element_text(face = "bold")
     )
   save_ggplot(confusion_plot, paste0("02_confusion_", target_name, ".png"),
-              if (target_name == "class") 10 else 7,
+              if (target_name == "class") 10 else if (target_name == "Behavior") 9 else 7,
               if (target_name == "class") 8 else 6)
   cat(sprintf("\nHighest mean macro-F1 configuration for %s: %s with %s; macro-F1 %.3f ± %.3f; balanced accuracy %.3f ± %.3f.\n",
               target_name, selected$representation, selected$classifier,

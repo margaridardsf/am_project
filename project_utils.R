@@ -39,6 +39,13 @@ am_read_mouse_data <- function(path = "Data_Cortex_Nuclear.xls") {
   }
   data$MeasurementID <- as.character(data$MouseID)
   data$MouseID <- sub("_[0-9]+$", "", data$MeasurementID)
+  if (anyNA(data$MouseID) || any(!nzchar(data$MouseID)) || anyDuplicated(data$MeasurementID)) {
+    stop("Measurement identifiers must be present and unique in the source workbook.")
+  }
+  readings_per_mouse <- table(data$MouseID)
+  if (any(readings_per_mouse != 15L)) {
+    stop("Expected 15 assay readings for every mouse; check the selected workbook version.")
+  }
   for (variable in c("Genotype", "Treatment", "Behavior", "class")) {
     data[[variable]] <- factor(data[[variable]])
   }
@@ -72,14 +79,24 @@ am_mouse_metadata <- function(data) {
 # in triplicate (Ahmed et al., 2015, doi:10.1371/journal.pone.0119491); this mean
 # is not a mean of 15 biological replicates.
 am_mouse_means <- function(data, protein_names, mouse_ids = unique(data$MouseID)) {
-  result <- matrix(NA_real_, nrow = length(mouse_ids), ncol = length(protein_names),
-                   dimnames = list(mouse_ids, protein_names))
-  for (i in seq_along(mouse_ids)) {
-    rows <- data$MouseID == mouse_ids[i]
-    result[i, ] <- vapply(data[rows, protein_names, drop = FALSE], function(values) {
-      if (all(is.na(values))) NA_real_ else mean(values, na.rm = TRUE)
-    }, numeric(1))
-  }
+  # This small assay matrix is dense; grouped row sums avoid repeated data-frame scans without sparse-matrix overhead.
+  protein_matrix <- as.matrix(data[, protein_names, drop = FALSE])
+  storage.mode(protein_matrix) <- "double"
+  mouse_group <- factor(as.character(data$MouseID), levels = mouse_ids)
+  if (anyNA(mouse_group)) stop("Some measurement rows do not match the requested mouse IDs.")
+
+  observed <- !is.na(protein_matrix)
+  protein_matrix[!observed] <- 0
+  totals <- rowsum(protein_matrix, mouse_group, reorder = FALSE)
+  counts <- rowsum(1.0 * observed, mouse_group, reorder = FALSE)
+  mouse_rows <- match(as.character(mouse_ids), rownames(totals))
+  if (anyNA(mouse_rows)) stop("Could not aggregate every requested mouse.")
+
+  totals <- totals[mouse_rows, , drop = FALSE]
+  counts <- counts[mouse_rows, , drop = FALSE]
+  result <- totals / counts
+  result[counts == 0] <- NA_real_
+  dimnames(result) <- list(as.character(mouse_ids), protein_names)
   result
 }
 
@@ -276,14 +293,20 @@ am_classification_metrics <- function(observed, predicted, class_levels = levels
     balanced_accuracy = mean(recall), macro_f1 = mean(f1))
 }
 
-am_classifier_grid <- function(method) {
+am_classifier_grid <- function(method, number_of_classes = NULL) {
+  logistic_lambdas <- if (!is.null(number_of_classes) && number_of_classes > 2L) {
+    c(1, 10, 100)
+  } else {
+    c(0.1, 1, 10)
+  }
   switch(method,
     SVM = expand.grid(C = c(0.5, 4), sigma_multiplier = c(0.5, 2),
                       KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE),
     RandomForest = expand.grid(mtry_rule = c("sqrt", "third"),
-                               min_node_size = 2L,
+                               min_node_size = c(2L, 5L),
                                KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE),
-    RegularisedLogistic = expand.grid(alpha = c(0, 1), lambda = c(0.05, 0.5),
+    RegularisedLogistic = expand.grid(alpha = c(0, 0.5, 1),
+                                      lambda = logistic_lambdas,
                                       KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE),
     kNN = data.frame(k = c(3L, 5L, 7L)),
     stop("Unknown classifier: ", method)
@@ -307,7 +330,7 @@ am_fit_predict <- function(x_train, x_test, y_train, method, parameters, seed = 
   }
 
   if (method == "SVM") {
-    sigma_estimates <- kernlab::sigest(x_train, frac = 0.5)
+    sigma_estimates <- kernlab::sigest(x_train, frac = 1)
     base_sigma <- as.numeric(sigma_estimates[2])
     if (!is.finite(base_sigma) || base_sigma <= 0) base_sigma <- 1 / ncol(x_train)
     class_counts <- table(y_train)
@@ -357,10 +380,18 @@ am_fit_predict <- function(x_train, x_test, y_train, method, parameters, seed = 
     } else {
       class_counts <- table(y_train)
       observation_weights <- length(y_train) / (nlevels(y_train) * class_counts[as.character(y_train)])
-      fit <- glmnet::glmnet(
-        x = x_train, y = y_train, family = "multinomial", alpha = parameters$alpha,
-        lambda = parameters$lambda, weights = as.numeric(observation_weights),
-        standardize = FALSE
+      # The fold-level small-class warning is reported once in each analysis script.
+      fit <- withCallingHandlers(
+        glmnet::glmnet(
+          x = x_train, y = y_train, family = "multinomial", alpha = parameters$alpha,
+          lambda = parameters$lambda, weights = as.numeric(observation_weights),
+          standardize = FALSE
+        ),
+        warning = function(warning) {
+          if (grepl("class has fewer than 8", conditionMessage(warning), fixed = TRUE)) {
+            invokeRestart("muffleWarning")
+          }
+        }
       )
       predicted <- as.character(stats::predict(fit, newx = x_test, s = parameters$lambda,
                                                 type = "class"))
@@ -373,12 +404,16 @@ am_fit_predict <- function(x_train, x_test, y_train, method, parameters, seed = 
     training_rows <- seq_len(nrow(x_train))
     test_rows <- nrow(x_train) + seq_len(nrow(x_test))
     class_levels <- levels(y_train)
+    class_counts <- table(y_train)
+    class_weights <- length(y_train) / (nlevels(y_train) * class_counts)
     predicted <- vapply(test_rows, function(row) {
       distance <- distances[row, training_rows]
       neighbours <- order(distance)[seq_len(min(parameters$k, length(distance)))]
-      neighbour_weights <- 1 / pmax(distance[neighbours], 1e-8)
+      neighbour_classes <- as.character(y_train[neighbours])
+      neighbour_weights <- 1 / pmax(distance[neighbours], 1e-8) *
+        as.numeric(class_weights[neighbour_classes])
       votes <- vapply(class_levels, function(level) {
-        sum(neighbour_weights[as.character(y_train[neighbours]) == level])
+        sum(neighbour_weights[neighbour_classes == level])
       }, numeric(1))
       tied <- class_levels[votes == max(votes)]
       if (length(tied) == 1L) tied else {
@@ -396,7 +431,8 @@ am_run_nested_group_cv <- function(x, metadata, target_name,
                                    representation = c("raw", "pca90"),
                                    method = c("SVM", "RandomForest", "RegularisedLogistic", "kNN"),
                                    repeats = 5L, outer_folds = 5L, inner_folds = 3L,
-                                   seed = 20261117L, verbose = TRUE) {
+                                   seed = 20261117L, verbose = TRUE,
+                                   stratify_name = target_name) {
   missing_strategy <- match.arg(missing_strategy)
   representation <- match.arg(representation)
   method <- match.arg(method)
@@ -404,27 +440,43 @@ am_run_nested_group_cv <- function(x, metadata, target_name,
   if (anyNA(metadata$MouseID)) stop("Mouse profiles and metadata are not aligned.")
   target <- factor(metadata[[target_name]])
   if (anyNA(target)) stop("Target labels cannot be missing.")
+  if (length(stratify_name) != 1L || !stratify_name %in% names(metadata)) {
+    stop("The requested fold-stratification variable is not present in the mouse metadata.")
+  }
+  fold_strata <- factor(metadata[[stratify_name]])
+  if (anyNA(fold_strata)) stop("Fold-stratification labels cannot be missing.")
   if (nrow(x) != nrow(metadata) || anyDuplicated(metadata$MouseID)) {
     stop("Classification data must contain one profile per unique mouse.")
   }
 
-  candidate_grid <- am_classifier_grid(method)
+  candidate_grid <- am_classifier_grid(method, nlevels(target))
   prediction_results <- list()
   tuning_results <- list()
   error_count <- 0L
+  error_messages <- character()
   result_index <- 0L
   tuning_index <- 0L
   for (repeat_id in seq_len(repeats)) {
-    outer <- am_make_group_folds(metadata, target, metadata$MouseID, outer_folds,
+    outer <- am_make_group_folds(metadata, fold_strata, metadata$MouseID, outer_folds,
                                  seed + repeat_id * 1000L)
     for (fold_id in seq_along(outer)) {
       test_index <- outer[[fold_id]]
       train_index <- setdiff(seq_len(nrow(metadata)), test_index)
       train_meta <- metadata[train_index, , drop = FALSE]
       train_target <- target[train_index]
-      inner <- am_make_group_folds(train_meta, train_target, train_meta$MouseID,
+      inner_strata <- factor(train_meta[[stratify_name]])
+      inner <- am_make_group_folds(train_meta, inner_strata, train_meta$MouseID,
                                    inner_folds,
                                    seed + repeat_id * 1000L + fold_id * 31L)
+      inner_prepared <- lapply(seq_along(inner), function(inner_fold) {
+        inner_valid <- inner[[inner_fold]]
+        inner_train <- setdiff(seq_len(nrow(train_meta)), inner_valid)
+        am_preprocess_fold(
+          x[train_index[inner_train], , drop = FALSE],
+          x[train_index[inner_valid], , drop = FALSE],
+          missing_strategy = missing_strategy, representation = representation
+        )
+      })
       candidate_scores <- rep(-Inf, nrow(candidate_grid))
       candidate_balanced <- rep(-Inf, nrow(candidate_grid))
 
@@ -432,26 +484,38 @@ am_run_nested_group_cv <- function(x, metadata, target_name,
         inner_observed <- character()
         inner_predicted <- character()
         candidate <- as.list(candidate_grid[candidate_id, , drop = FALSE])
+        candidate_description <- paste(names(candidate), unlist(candidate),
+                                       sep = "=", collapse = "; ")
         candidate_failed <- FALSE
         for (inner_fold in seq_along(inner)) {
           inner_valid <- inner[[inner_fold]]
           inner_train <- setdiff(seq_len(nrow(train_meta)), inner_valid)
           try_result <- tryCatch({
-            prepared <- am_preprocess_fold(
-              x[train_index[inner_train], , drop = FALSE],
-              x[train_index[inner_valid], , drop = FALSE],
-              missing_strategy = missing_strategy, representation = representation
-            )
             fitted <- am_fit_predict(
-              prepared$x_train, prepared$x_test, train_target[inner_train], method,
+              inner_prepared[[inner_fold]]$x_train,
+              inner_prepared[[inner_fold]]$x_test,
+              train_target[inner_train], method,
               candidate, seed + repeat_id * 10000L + fold_id * 100L +
-                candidate_id * 10L + inner_fold
+                inner_fold
             )
+            if (length(fitted$predicted) != length(inner_valid) ||
+                anyNA(fitted$predicted) ||
+                !all(fitted$predicted %in% levels(target))) {
+              stop("The classifier returned missing or invalid predictions.")
+            }
             list(predicted = fitted$predicted,
                  observed = as.character(train_target[inner_valid]))
           }, error = function(error) {
             candidate_failed <<- TRUE
             error_count <<- error_count + 1L
+            error_messages <<- c(
+              error_messages,
+              paste0("target=", target_name, "; missing=", missing_strategy,
+                     "; representation=", representation, "; classifier=", method,
+                     "; repeat=", repeat_id, "; outer_fold=", fold_id,
+                     "; inner_fold=", inner_fold, "; candidate=", candidate_description,
+                     "; error=", conditionMessage(error))
+            )
             NULL
           })
           if (is.null(try_result)) break
@@ -465,9 +529,12 @@ am_run_nested_group_cv <- function(x, metadata, target_name,
           candidate_balanced[candidate_id] <- scores[["balanced_accuracy"]]
         }
       }
-      best_candidate <- if (all(!is.finite(candidate_scores))) 1L else {
-        order(-candidate_scores, -candidate_balanced)[1]
+      if (all(!is.finite(candidate_scores))) {
+        stop("Every inner-CV candidate failed for target ", target_name,
+             " and classifier ", method, ". First error: ",
+             if (length(error_messages)) error_messages[1] else "no candidate score was produced.")
       }
+      best_candidate <- order(-candidate_scores, -candidate_balanced)[1]
       selected_parameters <- as.list(candidate_grid[best_candidate, , drop = FALSE])
 
       try_result <- tryCatch({
@@ -478,10 +545,16 @@ am_run_nested_group_cv <- function(x, metadata, target_name,
         fitted <- am_fit_predict(prepared$x_train, prepared$x_test, target[train_index],
                                  method, selected_parameters,
                                  seed + repeat_id * 100000L + fold_id)
+        if (length(fitted$predicted) != length(test_index) ||
+            anyNA(fitted$predicted) ||
+            !all(fitted$predicted %in% levels(target))) {
+          stop("The classifier returned missing or invalid predictions.")
+        }
         fitted$prepared <- prepared
         fitted
       }, error = function(error) {
         error_count <<- error_count + 1L
+      error_messages <<- c(error_messages, conditionMessage(error))
         stop("Outer-fold model failed (", target_name, ", ", method, ", repeat ",
              repeat_id, ", fold ", fold_id, "): ", conditionMessage(error))
       })
@@ -530,7 +603,8 @@ am_run_nested_group_cv <- function(x, metadata, target_name,
   list(predictions = predictions,
        repeat_metrics = do.call(rbind, repeat_results),
        tuning = do.call(rbind, tuning_results),
-       errors = error_count)
+       errors = error_count,
+       error_messages = unique(error_messages))
 }
 
 am_summarise_cv_results <- function(results) {

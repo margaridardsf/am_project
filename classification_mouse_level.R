@@ -23,8 +23,9 @@ mouse_metadata <- am_mouse_metadata(raw_data)
 mouse_profiles <- am_mouse_means(raw_data, protein_names, mouse_metadata$MouseID)
 mouse_metadata <- mouse_metadata[match(rownames(mouse_profiles), mouse_metadata$MouseID), , drop = FALSE]
 
-if (nrow(mouse_profiles) != 72L || anyDuplicated(mouse_metadata$MouseID)) {
-  stop("The expected project data should contain one mean profile per each of 72 mice.")
+if (nrow(raw_data) != 1080L || nrow(mouse_profiles) != 72L ||
+    ncol(mouse_profiles) != 77L || anyDuplicated(mouse_metadata$MouseID)) {
+  stop("Expected the project workbook version with 1,080 rows, 72 mice and 77 proteins.")
 }
 cat("MOUSE-LEVEL CLASSIFICATION: NESTED, MOUSE-GROUPED CROSS-VALIDATION\n")
 cat("Source workbook:", source_data$source_path, "\n")
@@ -33,21 +34,29 @@ cat("One arithmetic mean profile of up to 15 assay readings per mouse:", nrow(mo
 cat("The source study describes three technical replicates across five dilution levels per mouse. The workbook lacks explicit dilution/replicate identifiers, so these means are pragmatic baseline features, not biological means from 15 independent replicates.\n")
 cat("No class labels, behaviour labels, treatment labels or mouse IDs are predictors.\n")
 cat("Each validation fold holds out whole mouse profiles; preprocessing and tuning are refitted within training folds.\n")
+cat("The same class-stratified mouse folds are reused across targets so their scores are paired on the same held-out mice.\n")
 cat("Comparison: all predictors with training-fold median imputation versus removal of proteins with >5% missing mouse averages; direct profiles versus PCA retaining 90% of training variance.\n")
-cat("Classifiers: RBF SVM and Random Forest for both tasks; ridge/lasso-regularised logistic regression is added for genotype only because the eight-class folds contain very few mice per class.\n\n")
+cat("Classifiers: RBF SVM, class-weighted Random Forest and ridge/elastic-net/lasso-regularised logistic regression.\n")
+cat("The eight-class logistic model is an exploratory comparator: inner training folds contain fewer than eight mice per class, so its estimates may be unstable.\n")
+cat("The behaviour target is the experimental protocol label; it does not indicate whether a mouse actually learnt.\n\n")
 
-targets <- c("class", "Genotype")
+targets <- c("class", "Genotype", "Behavior")
+target_display <- c(class = "Eight-class label", Genotype = "Genotype",
+                    Behavior = "Behaviour protocol")
 missing_strategies <- c("retain", "remove_sparse")
 representations <- c("raw", "pca90")
 classifiers_by_target <- list(
-  class = c("SVM", "RandomForest"),
-  Genotype = c("SVM", "RandomForest", "RegularisedLogistic")
+  class = c("SVM", "RandomForest", "RegularisedLogistic"),
+  Genotype = c("SVM", "RandomForest", "RegularisedLogistic"),
+  Behavior = c("SVM", "RandomForest", "RegularisedLogistic")
 )
-repeats <- 5L
+repeats <- suppressWarnings(as.integer(Sys.getenv("AM_PROJECT_CV_REPEATS", "5")))
+if (is.na(repeats) || repeats < 1L) stop("AM_PROJECT_CV_REPEATS must be a positive integer.")
 outer_folds <- 5L
 inner_folds <- 3L
 analysis_results <- list()
 result_index <- 0L
+analysis_start <- proc.time()[["elapsed"]]
 total_analyses <- sum(vapply(targets, function(target_name) {
   length(missing_strategies) * length(representations) *
     length(classifiers_by_target[[target_name]])
@@ -68,7 +77,7 @@ for (target_name in targets) {
           representation = representation,
           method = classifier,
           repeats = repeats, outer_folds = outer_folds,
-          inner_folds = inner_folds,
+          inner_folds = inner_folds, stratify_name = "class",
           seed = 20261117L, verbose = FALSE
         )
       }
@@ -82,9 +91,27 @@ metric_columns <- grep("^(mean|sd)_", names(model_summary_print), value = TRUE)
 model_summary_print[metric_columns] <- lapply(model_summary_print[metric_columns], round, 3)
 cat("\nRepeated outer-fold performance (mean and SD across complete grouped-CV repeats):\n")
 print(model_summary_print, row.names = FALSE)
-cat("\nThe eight-class results are primary; genotype-only results are a secondary comparison.\n")
+cat("\nThe eight-class task is primary; genotype and behaviour-protocol tasks are secondary factor-wise comparisons.\n")
 cat("Balanced accuracy and macro-F1 weight classes equally; accuracy is included for context.\n")
 cat("The reported SD measures variation across repeated partitions, not a formal confidence interval.\n")
+cat("Reference balanced-accuracy levels are 1/8 for the eight-class task and 1/2 for each binary task.\n")
+for (target_name in targets) {
+  target_counts <- table(mouse_metadata[[target_name]])
+  cat(sprintf("  %s: %s mice per class; majority-class accuracy reference %.3f.\n",
+              target_display[[target_name]],
+              paste(paste(names(target_counts), as.integer(target_counts), sep = "="),
+                    collapse = ", "),
+              max(target_counts) / sum(target_counts)))
+}
+failed_candidate_fits <- sum(vapply(analysis_results, `[[`, integer(1), "errors"))
+cat("Failed inner-fold candidate fits handled during tuning:", failed_candidate_fits, "\n")
+if (failed_candidate_fits > 0L) {
+  failure_messages <- unique(unlist(lapply(analysis_results, `[[`, "error_messages")))
+  cat("Distinct candidate-fit messages:\n")
+  print(failure_messages)
+}
+cat(sprintf("Nested-CV analysis elapsed time: %.1f minutes.\n",
+            (proc.time()[["elapsed"]] - analysis_start) / 60))
 
 performance_long <- rbind(
   data.frame(model_summary[, c("target", "missing_strategy", "representation", "classifier")],
@@ -94,8 +121,9 @@ performance_long <- rbind(
              metric = "Macro-F1", mean = model_summary$mean_macro_f1,
              sd = model_summary$sd_macro_f1)
 )
-performance_long$target_plot <- ifelse(
-  performance_long$target == "class", "Eight-class label", "Genotype"
+performance_long$target_plot <- factor(
+  unname(target_display[performance_long$target]),
+  levels = unname(target_display[targets])
 )
 performance_plot <- ggplot2::ggplot(
   performance_long,
@@ -107,7 +135,7 @@ performance_plot <- ggplot2::ggplot(
     ggplot2::aes(ymin = pmax(0, mean - sd), ymax = pmin(1, mean + sd)),
     position = ggplot2::position_dodge(width = 0.55), width = 0.16
   ) +
-  ggplot2::facet_grid(metric ~ target_plot, scales = "free_x") +
+  ggplot2::facet_grid(metric ~ target_plot) +
   ggplot2::scale_colour_manual(
     values = c(retain = "#0072B2", remove_sparse = "#D55E00"),
     labels = c(retain = "All predictors, median imputation",
@@ -119,7 +147,7 @@ performance_plot <- ggplot2::ggplot(
                               expand = ggplot2::expansion(mult = c(0, 0.02))) +
   ggplot2::labs(
     title = "Mouse-level classification performance",
-    subtitle = "Predictors are per-mouse arithmetic means across up to 15 assay readings; error bars show one SD across five nested grouped-CV runs",
+    subtitle = "Mouse-level means; error bars show SD across five nested grouped-CV runs",
     x = NULL, y = "Performance", colour = "Missing-data strategy", shape = "Predictor representation"
   ) +
   ggplot2::theme_minimal(base_size = 10) +
@@ -131,7 +159,7 @@ performance_plot <- ggplot2::ggplot(
     legend.box = "vertical",
     plot.title = ggplot2::element_text(face = "bold")
   )
-save_ggplot(performance_plot, "01_model_performance_comparison.png", 15, 9)
+  save_ggplot(performance_plot, "01_model_performance_comparison.png", 17, 9)
 
 all_predictions <- do.call(rbind, lapply(analysis_results, `[[`, "predictions"))
 for (target_name in targets) {
@@ -167,7 +195,7 @@ for (target_name in targets) {
     ggplot2::coord_equal() +
     ggplot2::labs(
       title = paste("Out-of-fold confusion matrix:",
-                    if (target_name == "class") "eight-class label" else target_name),
+                    target_display[[target_name]]),
       subtitle = paste0("Selected after comparison: ", selected$missing_strategy,
                         " / ", selected$representation, " / ", selected$classifier,
                         "\nCounts and row percentages pool repeated out-of-fold predictions; descriptive only"),
@@ -183,7 +211,7 @@ for (target_name in targets) {
               if (target_name == "class") 10 else 7,
               if (target_name == "class") 8 else 6)
   cat(sprintf("\nHighest mean macro-F1 configuration for %s (descriptive model selection): %s, %s, %s; macro-F1 %.3f ± %.3f; balanced accuracy %.3f ± %.3f.\n",
-              target_name, selected$missing_strategy, selected$representation,
+              target_display[[target_name]], selected$missing_strategy, selected$representation,
               selected$classifier, selected$mean_macro_f1, selected$sd_macro_f1,
               selected$mean_balanced_accuracy, selected$sd_balanced_accuracy))
   cat("Its confusion matrix pools one out-of-fold prediction per mouse per repeat; choosing the configuration after comparison makes this matrix descriptive, not an independent test estimate.\n")

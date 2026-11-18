@@ -1,30 +1,11 @@
 options(stringsAsFactors = FALSE, scipen = 999)
 if (!interactive()) grDevices::pdf(NULL)
 
-user_library <- Sys.getenv("AM_PROJECT_R_LIB", unset = "")
-if (!nzchar(user_library)) {
-  user_library <- file.path(
-    Sys.getenv("LOCALAPPDATA", unset = path.expand("~")),
-    "R", "win-library",
-    paste(R.version$major, strsplit(R.version$minor, "\\.")[[1]][1], sep = ".")
-  )
-}
-if (!dir.exists(user_library)) dir.create(user_library, recursive = TRUE, showWarnings = FALSE)
-.libPaths(c(user_library, .libPaths()))
-
-required_packages <- c("readxl", "ggplot2", "corrplot")
-missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
-if (length(missing_packages)) {
-  install.packages(missing_packages, lib = user_library, repos = "https://cloud.r-project.org")
-}
-still_missing <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
-if (length(still_missing)) {
-  stop("Required R packages could not be loaded: ", paste(still_missing, collapse = ", "))
-}
 if (!file.exists("project_utils.R")) {
   stop("Run this script with the project folder as the working directory.")
 }
 source("project_utils.R")
+am_project_packages(c("readxl", "ggplot2", "corrplot"))
 
 plot_output_dir <- "plots_ratos"
 if (!dir.exists(plot_output_dir)) dir.create(plot_output_dir, recursive = TRUE)
@@ -52,34 +33,15 @@ save_base_plot <- function(filename, width = 10, height = 7, draw) {
   invisible(output_path)
 }
 
-data_path <- "Data_Cortex_Nuclear.xls"
-if (!file.exists(data_path)) data_path <- file.choose()
-read_path <- file.path(tempdir(), "Data_Cortex_Nuclear.xls")
-if (!file.copy(data_path, read_path, overwrite = TRUE)) {
-  stop("Could not copy the source workbook to a temporary path for reading.")
+source_data <- am_read_mouse_data("Data_Cortex_Nuclear.xls")
+dados <- source_data$data
+protein_names <- source_data$protein_names
+if (nrow(dados) != 1080L || length(unique(dados$MouseID)) != 72L ||
+    length(protein_names) != 77L) {
+  stop("The analysis expects the project workbook version with 1,080 rows, 72 mice and 77 proteins.")
 }
-dados <- as.data.frame(readxl::read_excel(read_path, na = c("NA", "")))
-names(dados) <- trimws(names(dados))
-
-required_metadata <- c("MouseID", "Genotype", "Treatment", "Behavior", "class")
-missing_metadata <- setdiff(required_metadata, names(dados))
-if (length(missing_metadata)) {
-  stop("Expected metadata columns not found: ", paste(missing_metadata, collapse = ", "))
-}
-
-dados$MeasurementID <- as.character(dados$MouseID)
-dados$MouseID <- sub("_[0-9]+$", "", dados$MeasurementID)
 measurement_index <- as.integer(sub("^.*_([0-9]+)$", "\\1", dados$MeasurementID))
-if (anyNA(measurement_index)) {
-  stop("Measurement IDs must end with a numeric within-mouse suffix.")
-}
-for (v in c("Genotype", "Treatment", "Behavior", "class")) dados[[v]] <- factor(dados[[v]])
-protein_names <- setdiff(names(dados), c(required_metadata, "MeasurementID"))
-if (!length(protein_names)) stop("No protein columns were detected.")
-non_numeric <- protein_names[!vapply(dados[protein_names], is.numeric, logical(1))]
-if (length(non_numeric)) {
-  stop("Protein columns must be numeric: ", paste(non_numeric, collapse = ", "))
-}
+if (anyNA(measurement_index)) stop("Measurement IDs must end with a numeric within-mouse suffix.")
 protein_pairs <- combn(protein_names, 2, simplify = FALSE)
 exact_duplicate_list <- Filter(function(pair) identical(dados[[pair[1]]], dados[[pair[2]]]), protein_pairs)
 exact_duplicate_features <- if (length(exact_duplicate_list)) {
@@ -90,31 +52,13 @@ exact_duplicate_features <- if (length(exact_duplicate_list)) {
 names(exact_duplicate_features) <- c("protein_1", "protein_2")
 
 measurements_per_mouse <- table(dados$MouseID)
-measurement_count_frequency <- table(as.integer(measurements_per_mouse))
-expected_measurements <- as.integer(names(measurement_count_frequency)[which.max(measurement_count_frequency)])
-if (any(measurements_per_mouse != expected_measurements)) {
-  warning("The number of measurements differs across mice. Check the MouseID suffix parsing.")
-}
-
-mouse_metadata <- dados[!duplicated(dados$MouseID), required_metadata]
-for (v in required_metadata[-1]) {
-  n_unique <- tapply(as.character(dados[[v]]), dados$MouseID,
-                     function(z) length(unique(na.omit(z))))
-  if (any(n_unique > 1)) stop("Metadata variable changes within MouseID: ", v)
-}
-row.names(mouse_metadata) <- mouse_metadata$MouseID
-
-mouse_means <- matrix(NA_real_, nrow = nrow(mouse_metadata), ncol = length(protein_names),
-                      dimnames = list(mouse_metadata$MouseID, protein_names))
-missing_counts <- matrix(0L, nrow = nrow(mouse_metadata), ncol = length(protein_names),
-                         dimnames = list(mouse_metadata$MouseID, protein_names))
-for (i in seq_len(nrow(mouse_metadata))) {
-  idx <- dados$MouseID == mouse_metadata$MouseID[i]
-  mouse_means[i, ] <- vapply(dados[idx, protein_names, drop = FALSE], function(z) {
-    if (all(is.na(z))) NA_real_ else mean(z, na.rm = TRUE)
-  }, numeric(1))
-  missing_counts[i, ] <- colSums(is.na(dados[idx, protein_names, drop = FALSE]))
-}
+mouse_metadata <- am_mouse_metadata(dados)
+mouse_means <- am_mouse_means(dados, protein_names, mouse_metadata$MouseID)
+protein_matrix <- as.matrix(dados[, protein_names, drop = FALSE])
+mouse_group <- factor(as.character(dados$MouseID), levels = mouse_metadata$MouseID)
+missing_counts <- rowsum(1.0 * is.na(protein_matrix), mouse_group, reorder = FALSE)
+missing_counts <- missing_counts[match(mouse_metadata$MouseID, rownames(missing_counts)), , drop = FALSE]
+rownames(missing_counts) <- mouse_metadata$MouseID
 
 class_levels <- levels(droplevels(mouse_metadata$class))
 mice_by_class <- table(factor(mouse_metadata$class, levels = class_levels))
@@ -591,6 +535,22 @@ if (nrow(X) >= 3 && ncol(X) >= 2) {
                            Treatment = mouse_metadata$Treatment,
                            Behavior = mouse_metadata$Behavior,
                            PC1 = pca_fit$x[, 1], PC2 = pca_fit$x[, 2])
+  # Flag extreme positions in the first two PCs for review, without excluding mice.
+  pca_scores$distance_first_two_pcs <- sqrt(
+    (pca_scores$PC1 / stats::sd(pca_scores$PC1))^2 +
+      (pca_scores$PC2 / stats::sd(pca_scores$PC2))^2
+  )
+  pca_score_flags <- pca_scores[
+    order(-pca_scores$distance_first_two_pcs),
+    c("MouseID", "class", "PC1", "PC2", "distance_first_two_pcs"),
+    drop = FALSE
+  ][seq_len(min(5L, nrow(pca_scores))), , drop = FALSE]
+  cat("Mice furthest from the origin in the first two standardised PC score directions (descriptive flags only):\n")
+  pca_score_flags$PC1 <- round(pca_score_flags$PC1, 2)
+  pca_score_flags$PC2 <- round(pca_score_flags$PC2, 2)
+  pca_score_flags$distance_first_two_pcs <- round(pca_score_flags$distance_first_two_pcs, 2)
+  print(pca_score_flags, row.names = FALSE)
+  cat("These mice remain in the analysis; an extreme PCA score alone is not a reason for exclusion. Check assay records if a profile is unexpected.\n")
   cat(sprintf("\nPCA after median imputation and standardisation: PC1 %.1f%%; PC2 %.1f%%; combined %.1f%%.\n",
               100 * pca_variance[1], 100 * pca_variance[2], 100 * sum(pca_variance[1:2])))
   cat("Components needed for 80% / 90% cumulative variance:", n_pc_80, "/", n_pc_90, "\n")
@@ -821,11 +781,12 @@ suffix_order_plot <- ggplot2::ggplot(
 save_ggplot(suffix_order_plot, "12_measurement_suffix_trend.png", 12, 14)
 
 cat("\nFinal-project analysis plan:\n")
-cat("1. Compare the eight experimental classes with the secondary genotype-only task.\n")
+cat("1. Treat eight-class prediction as primary; compare it with genotype and behaviour-protocol prediction as secondary tasks.\n")
+cat("   The behaviour label records the experimental protocol, not whether a mouse successfully learnt.\n")
 cat("2. Keep one mouse profile per observation and group all data by mouse in every validation fold.\n")
 cat("3. Compare fold-specific missing-data strategies, direct protein profiles, PCA, and repeated-reading interval profiles.\n")
 cat("4. Confirm the workbook suffix-to-dilution/replicate mapping and whether the 15 readings should be modelled by their assay structure or summarised with descriptive intervals.\n")
-cat(sprintf("With %d proteins and %d mice, standard LDA/QDA covariance estimates may be singular; consider dimension reduction or regularization.\n",
+cat(sprintf("With %d proteins and %d mice, standard LDA/QDA covariance estimates may be singular; compare PCA and regularised classifiers instead.\n",
             length(protein_names), nrow(mouse_metadata)))
 cat("\nSaved exploratory figures in:", normalizePath(plot_output_dir, winslash = "/"), "\n")
 
@@ -837,4 +798,4 @@ if (exists("pca_loadings")) {
                                by = "protein", all = TRUE, sort = FALSE)
 }
 
-cat("Detailed diagnostic tables are printed above; the script does not open a separate data viewer.\n")
+cat("Detailed diagnostic tables are printed above.\n")
